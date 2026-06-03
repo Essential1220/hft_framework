@@ -1,0 +1,69 @@
+# ===== Build artifacts =====
+build/
+build_*/
+out/
+cmake-build-*/
+
+# ===== Runtime output =====
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.o
+*.a
+
+# ===== Local configuration (NEVER commit real credentials) =====
+config.ini
+config.ini.bak
+*.local.ini
+
+# ===== Runtime state =====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+runtime_state.dat
+md_flow/
+td_flow/
+logs/
+*.log
+startup_trace.log
+tick_records*.dat
+tick_records*.jsonl
+tick_records*.htick
+
+# ===== IDE / editor =====
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+CMakeSettings.json
+
+# ===== CMake-generated =====
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+.ninja_log
+.ninja_deps
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
