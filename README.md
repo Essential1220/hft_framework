@@ -5,8 +5,8 @@
 [![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#build)
 [![Latency: p99 < 1μs](https://img.shields.io/badge/hot--path%20p99-%3C1%20%CE%BCs-brightgreen)](docs/BENCHMARK.md)
 
-> **Production-ready CTP/QDP live-trading host with embedded Python
-> strategies, p99 hot-path latency < 1μs.**
+> C++17 live-trading framework for Chinese futures, with CTP/QDP gateways,
+> embedded Python strategies, and reproducible latency benchmarks.
 
 [English](#english) · [中文](#中文)
 
@@ -16,16 +16,16 @@
 
 ### What is this?
 
-`hft_framework` is a **live-only** trading host for the Chinese futures
-market. It runs CTP and QDP (上期所 FTD 低延迟通道) gateways,
-embeds Python for strategy code, and keeps the hot path single-threaded
-and lock-free.
+`hft_framework` is a **live-only** trading framework for the Chinese futures
+market. It includes CTP and QDP (上期所 FTD 低延迟通道) gateway adapters,
+embedded Python strategy support, and a single-threaded lock-free hot path
+inside the engine.
 
 It deliberately does **not** include a backtest engine, a GUI, or a web
-control panel — keeping the binary one process, one thread on the hot
-path, and one file to deploy.
+control panel. The focus is the live execution layer and the interfaces
+around market data, order routing, risk checks, and strategy callbacks.
 
-### Why this over alternatives?
+### Scope and design trade-offs
 
 | | `hft_framework` | [vnpy](https://github.com/vnpy/vnpy) | [WonderTrader](https://github.com/wondertrader/wondertrader) |
 |---|---|---|---|
@@ -39,9 +39,9 @@ path, and one file to deploy.
 | **Backtest** | No (use a dedicated tool) | Yes | Yes |
 | **GUI** | No (stdout + log) | Yes (VNStudio) | Yes (WtStudio) |
 
-If you need a backtest engine or GUI, use vnpy or WonderTrader. If you
-need **production latency** with a clean single-binary deployment and
-Python strategy authoring, this is the one.
+This project is aimed at live execution experiments and framework study.
+If you need a full backtest engine or desktop GUI, mature projects such as
+vnpy or WonderTrader may be a better fit.
 
 ### Performance highlights
 
@@ -152,14 +152,14 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ### 这是什么？
 
-`hft_framework` 是一套面向**中国期货市场**的**纯实盘**交易框架。
+`hft_framework` 是一套面向**中国期货市场**的**实盘交易框架**。
 同时支持 CTP 和 QDP(上期所 FTD 低延迟通道)网关,内嵌 Python 写策略,
 热路径单线程 + 无锁。
 
-刻意**不做**回测引擎、GUI、Web 控制台 —— 进程只剩一个,热路径单线程,
-部署只丢一个可执行文件。
+项目不包含回测引擎、GUI、Web 控制台，重点放在实盘执行层、行情接入、
+报单接口、风控检查和策略回调这些核心链路。
 
-### 为什么选它而不是别的？
+### 项目范围和设计取舍
 
 | | `hft_framework` | [vnpy](https://github.com/vnpy/vnpy) | [WonderTrader](https://github.com/wondertrader/wondertrader) |
 |---|---|---|---|
@@ -173,8 +173,8 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 | **回测** | 无(用专门工具) | 有 | 有 |
 | **GUI** | 无(stdout + 日志) | 有(VNStudio) | 有(WtStudio) |
 
-如果你需要回测或 GUI,用 vnpy 或 WonderTrader。如果你需要
-**生产级延迟** + 干净的单二进制部署 + Python 策略开发体验,选这个。
+这个项目更适合用于实盘执行层实验、低延迟链路学习和策略接口验证。
+如果需要完整回测系统或桌面 GUI，vnpy、WonderTrader 这类成熟项目会更合适。
 
 ### 性能亮点
 
