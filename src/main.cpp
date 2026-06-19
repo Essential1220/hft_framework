@@ -1,5 +1,6 @@
 #include "app/app_runtime.h"
 #include "common/config.h"
+#include "common/huge_page.h"
 #include "common/logger.h"
 #include "common/string_utils.h"
 
@@ -19,6 +20,8 @@
 #define NOMINMAX
 #include <windows.h>
 #include <tlhelp32.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #endif
 
 namespace hft {
@@ -333,6 +336,10 @@ int main(int argc, char** argv) {
         set_thread_affinity(Logger::instance().worker_thread(), logger_cpu);
     }
 
+    if (hft::enable_lock_memory_privilege()) {
+        LOG_INFO("SeLockMemoryPrivilege enabled — large pages available");
+    }
+
     AppRuntime runtime;
     startup_trace("before_runtime_initialize");
     if (!runtime.initialize(config_path, []() { request_exit(); })) {
@@ -352,6 +359,10 @@ int main(int argc, char** argv) {
     }
     startup_trace("after_runtime_start");
 
+#ifdef _WIN32
+    timeBeginPeriod(1);
+#endif
+
     const int engine_cpu = config.get_int("Performance", "EngineCpuCore", -1);
     if (runtime.engine()) {
         auto& ct = runtime.engine()->get_consumer_thread();
@@ -363,7 +374,18 @@ int main(int argc, char** argv) {
             set_thread_high_priority(ct);
             LOG_INFO("consumer thread set to high priority");
         }
+#ifdef _WIN32
+        SetThreadPriorityBoost(static_cast<HANDLE>(ct.native_handle()), TRUE);
+#endif
     }
+
+#ifdef _WIN32
+    if (!SetProcessWorkingSetSizeEx(GetCurrentProcess(),
+            200ULL * 1024 * 1024, 400ULL * 1024 * 1024,
+            QUOTA_LIMITS_HARDWS_MIN_ENABLE)) {
+        LOG_WARN("SetProcessWorkingSetSizeEx failed, error=" + std::to_string(GetLastError()));
+    }
+#endif
 
     // 将 CTP SDK 内部线程绑定到指定 CPU 核心，减少 OS 调度抖动
     const int ctp_cpu = config.get_int("Performance", "CtpThreadCpuCore", -1);
@@ -379,6 +401,10 @@ int main(int argc, char** argv) {
     } else {
         run_service_loop();
     }
+
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
 
     runtime.stop();
     Logger::instance().shutdown();

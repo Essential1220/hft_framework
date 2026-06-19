@@ -45,14 +45,13 @@ vnpy or WonderTrader may be a better fit.
 
 ### Performance highlights
 
-Desktop i5-12490F, MSVC Release, single-threaded consumer:
-
-| Metric | Value |
-|---|---|
-| Conditional order check (止损/止盈/追踪触发) | **p99 = 0.10 μs** |
-| Order return processing | **p99 = 0.10 μs** |
-| Position update on trade | **p99 = 0.10 μs** |
-| SPSC queue throughput | **5.07 × 10⁸ ops/sec** |
+| Metric | Windows (MSVC) | Linux (GCC) |
+|---|---|---|
+| Tick → strategy p99 | 0.70 μs | 0.67 μs |
+| Send order p99 | 0.88 μs | 0.52 μs |
+| **Real-world tick → order out (SimNow)** | — | **< 50 μs** |
+| SPSC queue throughput | 8.3 × 10⁷ ops/s | **2.3 × 10⁸ ops/s** |
+| SimNow order round-trip | — | 28–78 ms (network) |
 
 Full report with machine spec and reproduction steps:
 **[docs/BENCHMARK.md](docs/BENCHMARK.md)**.
@@ -84,25 +83,36 @@ Full report with machine spec and reproduction steps:
 | Latency benchmark (`hft_bench`) | ✅ |
 | Backtest | ❌ (out of scope — use a dedicated tool) |
 | GUI | ❌ (use the binary's stdout/log) |
-| HTTP API | ❌ |
+| HTTP REST API + WebUI (Prometheus /metrics, tick/order/position) | ✅ |
+| UDP multicast market-data relay | ✅ |
+| Shared-memory IPC gateway | ✅ |
+| Dual-gateway hot failover (CTP_DUAL) | ✅ |
+| FIX protocol gateway (stub) | ✅ |
+| Write-ahead log (io_uring on Linux) | ✅ |
+| Standalone watchdog process | ✅ |
+| Windows OS tuning scripts (power/TCP/NIC/bcdedit) | ✅ |
 
 ### Quickstart
 
 ```powershell
 # 1. Clone
-git clone https://github.com/<you>/hft_framework.git && cd hft_framework
+git clone https://github.com/Essential1220/hft_framework.git && cd hft_framework
 
 # 2. Download CTP SDK from http://www.simnow.com.cn/ (requires free registration)
 #    Extract and note the path, e.g. C:/ctp_api/20250617_traderapi64_se_windows
 
-# 3. Build (MSVC 2022, x64)
-cmake -S . -B build_vs2022 -G "Visual Studio 17 2022" -A x64 -DCTP_SDK_DIR=C:/ctp_api/20250617_traderapi64_se_windows
-cmake --build build_vs2022 --config Release --target hft_framework
+# 3. Build — Windows (MSVC 2022, x64)
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCTP_SDK_DIR=C:/ctp_api/20250617_traderapi64_se_windows
+cmake --build build --config Release
+
+# 3. Build — Linux (GCC 13+)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCTP_SDK_DIR=/path/to/ctp_sdk_linux -DENABLE_LTO=ON -DENABLE_PYTHON=OFF
+cmake --build build -j$(nproc)
 
 # 4. Configure and run
-copy config.example.ini dist\config.ini
+cp config.example.ini dist/config.ini
 # Edit dist/config.ini: fill in UserID + Password, leave the rest default
-dist\hft_framework.exe --interactive --config dist\config.ini
+cd dist && ./hft_framework --config config.ini
 ```
 
 Full guide with prerequisites, troubleshooting, and first-strategy steps:
@@ -178,14 +188,13 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ### 性能亮点
 
-桌面 i5-12490F, MSVC Release, 单线程消费者:
-
-| 指标 | 数值 |
-|---|---|
-| 条件单检查(止损/止盈/追踪触发) | **p99 = 0.10 μs** |
-| 订单回报处理 | **p99 = 0.10 μs** |
-| 成交后持仓更新 | **p99 = 0.10 μs** |
-| SPSC 队列吞吐 | **5.07 × 10⁸ ops/sec** |
+| 指标 | Windows (MSVC) | Linux (GCC) |
+|---|---|---|
+| Tick → 策略 p99 | 0.70 μs | 0.67 μs |
+| 发单 p99 | 0.88 μs | 0.52 μs |
+| **实盘 tick → 报单发出 (SimNow)** | — | **< 50 μs** |
+| SPSC 队列吞吐 | 8.3 × 10⁷ ops/s | **2.3 × 10⁸ ops/s** |
+| SimNow 下单往返 | — | 28–78 ms (网络) |
 
 完整报告(含机器规格和复现步骤):
 **[docs/BENCHMARK.md](docs/BENCHMARK.md)**。
@@ -217,25 +226,34 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 | 延迟 benchmark (`hft_bench`) | ✅ |
 | 回测 | ❌ (不在范围内 —— 用专门工具) |
 | GUI | ❌ |
-| HTTP API | ❌ |
+| HTTP REST API + WebUI (Prometheus /metrics) | ✅ |
+| UDP 组播行情转发 | ✅ |
+| 共享内存 IPC 网关 | ✅ |
+| 双活网关热切换 (CTP_DUAL) | ✅ |
+| WAL 预写日志 (Linux io_uring) | ✅ |
+| 独立看门狗进程 | ✅ |
+| Windows OS 调优脚本 | ✅ |
 
 ### 快速上手
 
-```powershell
+```bash
 # 1. Clone
-git clone https://github.com/<you>/hft_framework.git && cd hft_framework
+git clone https://github.com/Essential1220/hft_framework.git && cd hft_framework
 
 # 2. 从 http://www.simnow.com.cn/ 下载 CTP SDK(免费注册)
-#    解压并记下路径, 例如 C:/ctp_api/20250617_traderapi64_se_windows
 
-# 3. 构建 (MSVC 2022, x64)
-cmake -S . -B build_vs2022 -G "Visual Studio 17 2022" -A x64 -DCTP_SDK_DIR=C:/ctp_api/20250617_traderapi64_se_windows
-cmake --build build_vs2022 --config Release --target hft_framework
+# 3. 构建 — Windows (MSVC 2022, x64)
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCTP_SDK_DIR=C:/ctp_api/20250617_traderapi64_se_windows
+cmake --build build --config Release
+
+# 3. 构建 — Linux (GCC 13+)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCTP_SDK_DIR=/path/to/ctp_sdk_linux -DENABLE_LTO=ON
+cmake --build build -j$(nproc)
 
 # 4. 配置并运行
-copy config.example.ini dist\config.ini
-# 编辑 dist/config.ini: 填 UserID + Password,其它默认
-dist\hft_framework.exe --interactive --config dist\config.ini
+cp config.example.ini dist/config.ini
+# 编辑 dist/config.ini: 填 UserID + Password
+cd dist && ./hft_framework --config config.ini
 ```
 
 完整指南(含前置依赖、故障排查、首个策略上手):

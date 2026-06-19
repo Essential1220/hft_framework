@@ -68,6 +68,15 @@ struct InstrumentKeyHash {
     }
 };
 
+inline uint32_t instrument_hash(const char* s) {
+    uint32_t h = 2166136261u;
+    for (; *s; ++s) {
+        h ^= static_cast<uint32_t>(static_cast<unsigned char>(*s));
+        h *= 16777619u;
+    }
+    return h;
+}
+
 template <size_t N>
 struct FixedKey {
     char data[N]{};
@@ -398,7 +407,8 @@ enum class RiskErrorCode {
     MAX_POSITION,          // Net position limit exceeded (净持仓超限)
     MAX_ORDER_SIZE,        // Single order size limit exceeded (单笔手数超限)
     DAILY_LOSS_LIMIT,      // Daily loss limit exceeded (日亏损限制)
-    ORDER_RATE_LIMIT       // Order rate limit exceeded (报单频率限制)
+    ORDER_RATE_LIMIT,      // Order rate limit exceeded (报单频率限制)
+    INVALID_PRICE          // Invalid order price (委托价格不合法)
 };
 
 inline const char* to_string(RiskErrorCode code) {
@@ -412,6 +422,7 @@ inline const char* to_string(RiskErrorCode code) {
         case RiskErrorCode::MAX_ORDER_SIZE:  return "MAX_ORDER_SIZE";
         case RiskErrorCode::DAILY_LOSS_LIMIT:return "DAILY_LOSS_LIMIT";
         case RiskErrorCode::ORDER_RATE_LIMIT:return "ORDER_RATE_LIMIT";
+        case RiskErrorCode::INVALID_PRICE:   return "INVALID_PRICE";
     }
     return "";
 }

@@ -107,9 +107,14 @@ void RiskManager::clamp_risk_params() {
 }
 
 void RiskManager::init(const Config& config, PositionManager* pos_mgr, OrderManager* order_mgr,
-                       const std::string& account_id) {
+                       TickDataManager* tick_mgr, const std::string& account_id) {
+    if (!pos_mgr || !order_mgr) {
+        LOG_ERROR("RiskManager::init: pos_mgr or order_mgr is null");
+        throw std::invalid_argument("RiskManager::init requires non-null PositionManager and OrderManager");
+    }
     pos_mgr_ = pos_mgr;
     order_mgr_ = order_mgr;
+    tick_mgr_ = tick_mgr;
     account_id_ = account_id;
 
     const std::string acct_section = account_id.empty() ? "" : "Risk." + account_id;
@@ -124,6 +129,7 @@ void RiskManager::init(const Config& config, PositionManager* pos_mgr, OrderMana
     cancel_rate_min_sample_ = config.get_int(section, "CancelRateMinSample", 10);
     max_cancel_rate_ = config.get_double(section, "MaxCancelRate", 0.5);
     max_daily_loss_ = config.get_double(section, "MaxDailyLoss", 0.0);
+    max_price_deviation_ = config.get_double(section, "MaxPriceDeviation", 0.1);
     cancel_rate_exempt_patterns_ = parse_pattern_list(
         config.get_string(section, "CancelRateExemptStrategies", ""));
     clamp_risk_params();
@@ -194,6 +200,29 @@ bool RiskManager::check_order(const OrderRequest& req, std::string& reject_reaso
     // 拦截手数为 0 或负数的非法报单
     if (req.volume <= 0) {
         return reject("order volume must be greater than 0", RiskErrorCode::None);
+    }
+
+    // ---- 检查1.5：委托价格校验 ----
+    if (req.price_type == OrderRequest::PriceType::Limit) {
+        if (req.price <= 0.0) {
+            return reject("limit order price must be positive", RiskErrorCode::INVALID_PRICE);
+        }
+        if (tick_mgr_) {
+            const TickData last = tick_mgr_->get_last_tick(req.instrument_id);
+            if (last.upper_limit > 0.0 && req.price > last.upper_limit) {
+                return reject("price exceeds upper limit", RiskErrorCode::INVALID_PRICE);
+            }
+            if (last.lower_limit > 0.0 && req.price < last.lower_limit) {
+                return reject("price below lower limit", RiskErrorCode::INVALID_PRICE);
+            }
+            if (last.last_price > 0.0 && max_price_deviation_ > 0.0) {
+                const double deviation = std::abs(req.price - last.last_price) / last.last_price;
+                if (deviation > max_price_deviation_) {
+                    return reject("price deviates >" + std::to_string(static_cast<int>(max_price_deviation_ * 100)) +
+                                  "% from last tick", RiskErrorCode::INVALID_PRICE);
+                }
+            }
+        }
     }
 
     // ---- 以下检查组：如果是为了降低风险（如止损平仓），则予以豁免 ----
@@ -371,6 +400,7 @@ void RiskManager::reload_risk_config(const Config& config) {
     cancel_rate_min_sample_ = config.get_int(section, "CancelRateMinSample", 10);
     max_cancel_rate_ = config.get_double(section, "MaxCancelRate", 0.5);
     max_daily_loss_ = config.get_double(section, "MaxDailyLoss", 0.0);
+    max_price_deviation_ = config.get_double(section, "MaxPriceDeviation", 0.1);
     cancel_rate_exempt_patterns_ = parse_pattern_list(
         config.get_string(section, "CancelRateExemptStrategies", ""));
     clamp_risk_params();

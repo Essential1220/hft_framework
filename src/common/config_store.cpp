@@ -1166,6 +1166,28 @@ std::string ConfigStore::load_system_config(const std::string& key, const std::s
     return result;
 }
 
+std::vector<std::pair<std::string, std::string>> ConfigStore::load_system_config_by_prefix(const std::string& prefix) const {
+    std::vector<std::pair<std::string, std::string>> result;
+    if (!db_) return result;
+    std::lock_guard<std::mutex> lock(read_mtx_);
+    const char* sql = "SELECT key, value FROM config_kv WHERE category='system' AND key LIKE ? || '%'";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_text(stmt, 1, prefix.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* k = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const auto* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (k) {
+            std::string key_str = k;
+            if (key_str.size() > prefix.size()) {
+                result.emplace_back(key_str.substr(prefix.size()), v ? v : "");
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 bool ConfigStore::save_encrypted_system_config(const std::string& key, const std::string& value) {
     if (value.empty()) {
         return save_system_config(key + "_enc", "") && save_system_config(key, "");

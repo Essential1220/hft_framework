@@ -10,10 +10,14 @@
 
 #include "common/types.h"
 #include "engine/i_trading_context.h"
+#include "engine/kline_manager.h"
+#include "market/order_book.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace hft {
@@ -40,6 +44,12 @@ public:
     // Lifecycle callback: called before strategy is unloaded, for cleanup
     // 生命周期回调：策略被卸载前调用，用于清理资源 (策略停止)
     virtual void on_stop() {}
+    // Event callback: called when a K-line bar completes (K 线完成回调)
+    virtual void on_bar(const std::string& instrument, const std::string& period, const KlineBar& bar) {
+        (void)instrument; (void)period; (void)bar;
+    }
+    // Event callback: called when a registered timer fires (定时器回调)
+    virtual void on_timer(int timer_id) { (void)timer_id; }
 
     // GIL batch optimization: whether this strategy requires the Python interpreter lock
     // GIL 批量优化：标记策略是否需要 Python 解释器锁 (需要解释器锁)
@@ -125,10 +135,30 @@ protected:
     // Query net position for a specific account (查询指定账号的净持仓)
     int get_net_position(const char* instrument, const char* account_id);
 
+    // Query order book snapshot (查询盘口深度快照)
+    WindowedOrderBook get_order_book(const char* instrument);
+    // Query account info (查询资金账户信息)
+    AccountInfo get_account_info(const std::string& account_id = "");
+    // Strategy logging through AsyncLogger (通过异步日志记录策略日志)
+    void log_info(const std::string& msg);
+    void log_warn(const std::string& msg);
+    void log_error(const std::string& msg);
+    // Strategy state persistence (策略状态持久化)
+    void save_state(const std::map<std::string, std::string>& state);
+    std::map<std::string, std::string> load_state();
+    // Timer registration (定时器注册)
+    int register_timer(int interval_ms);
+    void unregister_timer(int timer_id);
+    // Query historical K-lines (查询历史 K 线)
+    std::vector<KlineBar> query_klines(const std::string& instrument,
+                                        const std::string& period,
+                                        size_t count = 200);
+
     ITradingContext* engine_ = nullptr;                 // Trading engine instance (交易引擎实例)
     std::string strategy_id_;                         // Unique strategy identifier (策略唯一标识)
     std::string default_account_id_;                  // Default account used for orders (默认使用的资金账号)
     std::vector<std::string> watched_instruments_;    // Instruments this strategy monitors (该策略关注的合约列表)
+    std::unordered_set<uint32_t> watched_hashes_;    // FNV32 hashes of watched_instruments_ for O(1) lookup
     std::string strategy_type_;                       // Strategy type string, e.g. "simple" or "python" (策略类型)
     bool is_python_ = false;                          // Cached: whether strategy_type_ is "python" (缓存是否为python)
     std::string script_path_;                         // Path to the strategy script file (策略脚本路径)

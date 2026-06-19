@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 

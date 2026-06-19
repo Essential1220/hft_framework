@@ -25,6 +25,7 @@
 #include "common/config.h"
 #include "common/types.h"
 #include "position/position_manager.h"
+#include "engine/tick_data_manager.h"
 
 #include <chrono>
 #include <deque>
@@ -60,6 +61,7 @@ class RiskManager {
 public:
     // 初始化风控参数，从配置文件中读取各项硬性阈值并绑定相关管理器
     void init(const Config& config, PositionManager* pos_mgr, OrderManager* order_mgr,
+              TickDataManager* tick_mgr = nullptr,
               const std::string& account_id = "");
 
     // 核心检查函数：在下单前执行所有风控校验
@@ -145,6 +147,7 @@ private:
     int cancel_rate_min_sample_ = 10;    // 撤单率计算的最小样本数（防小样本误判）
     double max_cancel_rate_ = 0.5;        // 窗口内允许的最大撤单率 (撤单次数 / 发单次数)，例如 50%
     double max_daily_loss_ = 0.0;         // 限制日内最大绝对亏损金额（0 表示不限制）
+    double max_price_deviation_ = 0.1;    // 限价单价格偏离最新价的最大比例（默认 10%，0 表示不限制）
 
     // 撤单率豁免 strategy_id pattern 列表（glob：开头/结尾的 * 通配，例如 *_test、test_*）。
     // 命中的策略在 check_order 中跳过撤单率分支，但仍受 MaxOrderSize/MaxNetPosition 等其它检查约束。
@@ -153,6 +156,7 @@ private:
     // ---- 依赖的子系统指针 ----
     PositionManager* pos_mgr_ = nullptr;  // 用于查询当前实际持仓
     OrderManager* order_mgr_ = nullptr;   // 用于查询未成交的挂单(投影敞口)
+    TickDataManager* tick_mgr_ = nullptr; // 用于获取最新行情(价格校验)
     
     // 保护风控管理器内部状态的读写锁
     // 写操作(check_order/on_order_sent/on_cancel)用 unique_lock

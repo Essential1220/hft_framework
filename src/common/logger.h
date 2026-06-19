@@ -68,4 +68,10 @@ private:
 #define LOG_WARN(msg)  hft::AsyncLogger::instance().log_string(hft::LogLevel::Warn, std::string(msg))
 #define LOG_ERROR(msg) hft::AsyncLogger::instance().log_string(hft::LogLevel::Error, std::string(msg))
 
+#define LOG_HOT(msg) \
+    do { \
+        if (hft::AsyncLogger::instance().should_log(hft::LogLevel::Info)) \
+            hft::AsyncLogger::instance().log_string(hft::LogLevel::Info, std::string(msg)); \
+    } while(0)
+
 } // namespace hft

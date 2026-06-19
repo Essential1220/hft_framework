@@ -6,11 +6,16 @@
 // ============================================
 
 #include "common/types.h"
+#include "market/order_book.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace hft {
+
+struct KlineBar;
 
 class ITradingContext {
 public:
@@ -27,6 +32,22 @@ public:
 
     virtual PositionInfo get_position(const char* instrument, Direction dir, const std::string& account_id) const = 0;
     virtual int get_net_position(const char* instrument, const std::string& account_id) const = 0;
+
+    virtual WindowedOrderBook get_order_book(const char* instrument) const = 0;
+    virtual AccountInfo get_account_info(const std::string& account_id) const = 0;
+
+    virtual void strategy_log(const std::string& strategy_id, int level, const std::string& message) = 0;
+
+    virtual void save_strategy_state(const std::string& strategy_id,
+                                     const std::map<std::string, std::string>& state) = 0;
+    virtual std::map<std::string, std::string> load_strategy_state(const std::string& strategy_id) = 0;
+
+    virtual int register_timer(const std::string& strategy_id, int interval_ms) = 0;
+    virtual void unregister_timer(int timer_id) = 0;
+
+    virtual std::vector<KlineBar> query_klines(const std::string& instrument,
+                                                const std::string& period,
+                                                size_t count) const = 0;
 };
 
 } // namespace hft

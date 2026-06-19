@@ -25,6 +25,8 @@ public:
     void on_trade(const TradeInfo& trade) override;
     void on_reconnect() override;
     void on_stop() override;
+    void on_bar(const std::string& instrument, const std::string& period, const KlineBar& bar) override;
+    void on_timer(int timer_id) override;
 
     bool is_interpreted() const override { return true; }
     std::unique_ptr<InterpreterLockGuard> acquire_interpreter_lock() override;
@@ -42,6 +44,16 @@ public:
     int py_get_param_int(const std::string& key, int default_value = 0);
     double py_get_param_double(const std::string& key, double default_value = 0.0);
     py::dict py_get_strategy_context();
+    void py_log_info(const std::string& msg);
+    void py_log_warn(const std::string& msg);
+    void py_log_error(const std::string& msg);
+    void py_save_state(const py::dict& state);
+    py::dict py_load_state();
+    py::dict py_get_account_info(const std::string& account_id = "");
+    int py_register_timer(int interval_ms);
+    void py_unregister_timer(int timer_id);
+    py::dict py_get_order_book(const std::string& instrument);
+    py::list py_query_klines(const std::string& instrument, const std::string& period, size_t count = 200);
 
 private:
     // 加载 Python 脚本并缓存函数对象
@@ -51,6 +63,7 @@ private:
     static py::dict tick_to_dict(const TickData& tick);
     static py::dict order_to_dict(const OrderInfo& order);
     static py::dict trade_to_dict(const TradeInfo& trade);
+    static py::dict bar_to_dict(const KlineBar& bar);
 
     std::string script_path_; // Python 脚本绝对或相对路径
     std::string module_name_; // sys.modules 中的模块名（用于卸载时清理）
@@ -63,6 +76,8 @@ private:
     py::object fn_on_trade_;
     py::object fn_on_reconnect_;
     py::object fn_on_stop_;
+    py::object fn_on_bar_;
+    py::object fn_on_timer_;
 
     bool loaded_ = false; // 脚本是否成功加载
 };

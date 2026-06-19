@@ -1,6 +1,49 @@
 cmake_minimum_required(VERSION 3.16)
 project(hft_framework LANGUAGES C CXX)
 
+# ---- Default build type ----
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# ---- LTO (Link-Time Optimization) ----
+option(ENABLE_LTO "Enable Link-Time Optimization" OFF)
+if(ENABLE_LTO)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    message(STATUS "LTO: ON")
+endif()
+
+# ---- PGO (Profile-Guided Optimization) ----
+option(PGO_GENERATE "Build with PGO instrumentation (phase 1)" OFF)
+option(PGO_USE "Build with PGO optimization (phase 2)" OFF)
+set(PGO_DATA_DIR "${CMAKE_BINARY_DIR}/pgo_data" CACHE PATH "PGO profile data directory")
+
+if(PGO_GENERATE AND PGO_USE)
+    message(FATAL_ERROR "Cannot enable both PGO_GENERATE and PGO_USE simultaneously")
+endif()
+
+if(PGO_GENERATE)
+    if(MSVC)
+        add_compile_options(/GL)
+        add_link_options(/LTCG /GENPROFILE)
+    else()
+        add_compile_options(-fprofile-generate=${PGO_DATA_DIR})
+        add_link_options(-fprofile-generate=${PGO_DATA_DIR})
+    endif()
+    message(STATUS "PGO: GENERATE (MSVC: .pgd next to each binary)")
+endif()
+
+if(PGO_USE)
+    if(MSVC)
+        add_compile_options(/GL)
+        add_link_options(/LTCG /USEPROFILE)
+    else()
+        add_compile_options(-fprofile-use=${PGO_DATA_DIR} -fprofile-correction)
+        add_link_options(-fprofile-use=${PGO_DATA_DIR})
+    endif()
+    message(STATUS "PGO: USE (MSVC: .pgd next to each binary)")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/dist")
@@ -57,6 +100,8 @@ set(QDP_SDK_DIR "${CMAKE_SOURCE_DIR}/qdp_api" CACHE PATH "QDP SDK directory (hea
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/test/")
 list(FILTER CORE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/api/hft_api\\.cpp$")
+list(FILTER CORE_SOURCES EXCLUDE REGEX "src/watchdog/")
 
 if(NOT ENABLE_PYTHON)
     list(FILTER CORE_SOURCES EXCLUDE REGEX "py_strategy")
@@ -66,6 +111,12 @@ endif()
 # 这样仓库即使有 qdp 文件、用户不开关、也不需要 QDP SDK 就能编。
 if(NOT HFT_ENABLE_QDP)
     list(FILTER CORE_SOURCES EXCLUDE REGEX "gateway/qdp_")
+endif()
+
+list(FILTER CORE_SOURCES EXCLUDE REGEX "metrics/")
+option(ENABLE_METRICS "Enable Prometheus /metrics + REST API + WebUI" ON)
+if(NOT ENABLE_METRICS)
+    list(FILTER CORE_SOURCES EXCLUDE REGEX "webui/")
 endif()
 
 # hft_core：承载可复用的核心能力。
@@ -92,6 +143,25 @@ target_compile_definitions(sqlite3 PRIVATE
     SQLITE_DEFAULT_JOURNAL_SIZE_LIMIT=1048576
 )
 
+# cpp-httplib（header-only HTTP server for Prometheus /metrics endpoint）
+# 优先用本地 third_party/httplib.h；不存在时 FetchContent 从 GitHub 下载。
+if(ENABLE_METRICS)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/httplib.h")
+        add_library(httplib_local INTERFACE)
+        target_include_directories(httplib_local INTERFACE "${CMAKE_SOURCE_DIR}/third_party")
+        add_library(httplib::httplib ALIAS httplib_local)
+        message(STATUS "cpp-httplib: using local third_party/httplib.h")
+    else()
+        FetchContent_Declare(
+            httplib
+            URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.7.zip
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(httplib)
+        message(STATUS "cpp-httplib: downloaded via FetchContent")
+    endif()
+endif()
+
 add_library(hft_core STATIC ${CORE_SOURCES})
 
 target_include_directories(hft_core PUBLIC
@@ -100,6 +170,22 @@ target_include_directories(hft_core PUBLIC
 )
 
 target_link_libraries(hft_core PUBLIC sqlite3)
+
+if(WIN32)
+    target_link_libraries(hft_core PUBLIC ws2_32 winmm)
+else()
+    target_link_libraries(hft_core PUBLIC pthread uring)
+endif()
+
+option(HFT_HAS_DPDK "Enable DPDK kernel bypass (requires DPDK libraries)" OFF)
+if(HFT_HAS_DPDK)
+    target_compile_definitions(hft_core PUBLIC HFT_HAS_DPDK=1)
+endif()
+
+if(ENABLE_METRICS)
+    target_link_libraries(hft_core PUBLIC httplib::httplib)
+    target_compile_definitions(hft_core PUBLIC ENABLE_METRICS)
+endif()
 
 if(ENABLE_PYTHON)
     target_link_libraries(hft_core PUBLIC pybind11::embed)
@@ -135,6 +221,30 @@ if(HFT_ENABLE_QDP)
     message(STATUS "QDP gateway: ON (SDK=${QDP_SDK_DIR})")
 else()
     message(STATUS "QDP gateway: OFF (HFT_ENABLE_QDP=OFF)")
+endif()
+
+# ---- C API 共享库 (FFI: Go, Rust, C#, Java JNI, Python ctypes) ----
+option(ENABLE_CAPI "Build C API shared library (hft_capi.dll/.so)" ON)
+if(ENABLE_CAPI)
+    add_library(hft_capi SHARED src/api/hft_api.cpp)
+    target_link_libraries(hft_capi PRIVATE hft_core)
+    target_compile_definitions(hft_capi PRIVATE HFT_CAPI_EXPORTS)
+    target_include_directories(hft_capi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    if(WIN32)
+        target_link_libraries(hft_capi PRIVATE
+            ${CTP_SDK_DIR}/thostmduserapi_se.lib
+            ${CTP_SDK_DIR}/thosttraderapi_se.lib
+        )
+    else()
+        target_link_libraries(hft_capi PRIVATE
+            ${CTP_SDK_DIR}/thostmduserapi_se.so
+            ${CTP_SDK_DIR}/thosttraderapi_se.so
+        )
+    endif()
+    set_target_properties(hft_capi PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/dist"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/dist"
+    )
 endif()
 
 # 控制台入口：当前仍保留原有 hft_framework 可执行程序，
@@ -181,8 +291,11 @@ else()
         ${CTP_SDK_DIR}/thostmduserapi_se.so
         ${CTP_SDK_DIR}/thosttraderapi_se.so
         pthread
-        iconv  # GBK→UTF-8 转码，glibc 内置时无副作用，musl/Alpine 需安装 libiconv
     )
+    find_library(ICONV_LIB iconv)
+    if(ICONV_LIB)
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${ICONV_LIB})
+    endif()
 
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -201,6 +314,16 @@ else()
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/strategies"
             $<TARGET_FILE_DIR:${PROJECT_NAME}>/strategies
+    )
+endif()
+
+# ---- Watchdog standalone executable ----
+option(ENABLE_WATCHDOG "Build standalone watchdog process" ON)
+if(ENABLE_WATCHDOG)
+    add_executable(hft_watchdog src/watchdog/watchdog_main.cpp)
+    target_include_directories(hft_watchdog PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set_target_properties(hft_watchdog PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/dist"
     )
 endif()
 

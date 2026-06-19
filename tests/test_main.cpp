@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -196,6 +197,46 @@ void test_option_metrics_solves_call_iv_and_greeks();
 void test_option_metrics_solves_put_iv_and_delta();
 void test_option_metrics_rejects_missing_market_inputs();
 
+// WAL (Write-Ahead Log)
+void test_crc32_basic();
+void test_crc32_incremental();
+void test_wal_roundtrip();
+void test_wal_crc_corruption();
+void test_wal_file_not_found();
+void test_wal_empty_payload();
+
+// Watchdog shared memory
+void test_watchdog_shm_create_and_read();
+void test_watchdog_shm_cross_view();
+void test_watchdog_shm_stale_detection();
+
+// Dual gateway
+void test_dual_md_failover();
+void test_dual_trade_failover();
+void test_dual_md_no_backup();
+
+// Feature pipeline
+void test_feature_sma();
+void test_feature_ema();
+void test_feature_rsi();
+void test_feature_bid_ask_imbalance();
+void test_feature_vwap();
+void test_feature_multi_instrument();
+void test_feature_disabled();
+
+// FIX gateway stub
+void test_fix_md_stub();
+void test_fix_trade_stub();
+
+// Network receiver
+void test_udp_receiver_loopback();
+void test_udp_receiver_timeout();
+void test_network_receiver_factory();
+
+// UDP multicast gateway
+void test_udp_publish_receive_roundtrip();
+void test_udp_header_format();
+
 #ifdef HFT_HAS_QDP
 // QDP gateway smoke tests (only compiled when HFT_ENABLE_QDP=ON)
 void test_qdp_md_gateway_can_construct();
@@ -334,6 +375,53 @@ int main() {
     RUN_TEST(test_option_metrics_solves_call_iv_and_greeks);
     RUN_TEST(test_option_metrics_solves_put_iv_and_delta);
     RUN_TEST(test_option_metrics_rejects_missing_market_inputs);
+
+    // ---- WAL ----
+    TEST_SUITE("WAL");
+    RUN_TEST(test_crc32_basic);
+    RUN_TEST(test_crc32_incremental);
+    RUN_TEST(test_wal_roundtrip);
+    RUN_TEST(test_wal_crc_corruption);
+    RUN_TEST(test_wal_file_not_found);
+    RUN_TEST(test_wal_empty_payload);
+
+    // ---- Watchdog ----
+    TEST_SUITE("Watchdog");
+    RUN_TEST(test_watchdog_shm_create_and_read);
+    RUN_TEST(test_watchdog_shm_cross_view);
+    RUN_TEST(test_watchdog_shm_stale_detection);
+
+    // ---- Dual Gateway ----
+    TEST_SUITE("DualGateway");
+    RUN_TEST(test_dual_md_failover);
+    RUN_TEST(test_dual_trade_failover);
+    RUN_TEST(test_dual_md_no_backup);
+
+    // ---- Feature Pipeline ----
+    TEST_SUITE("FeaturePipeline");
+    RUN_TEST(test_feature_sma);
+    RUN_TEST(test_feature_ema);
+    RUN_TEST(test_feature_rsi);
+    RUN_TEST(test_feature_bid_ask_imbalance);
+    RUN_TEST(test_feature_vwap);
+    RUN_TEST(test_feature_multi_instrument);
+    RUN_TEST(test_feature_disabled);
+
+    // ---- FIX Gateway ----
+    TEST_SUITE("FixGateway");
+    RUN_TEST(test_fix_md_stub);
+    RUN_TEST(test_fix_trade_stub);
+
+    // ---- Network Receiver ----
+    TEST_SUITE("NetworkReceiver");
+    RUN_TEST(test_udp_receiver_loopback);
+    RUN_TEST(test_udp_receiver_timeout);
+    RUN_TEST(test_network_receiver_factory);
+
+    // ---- UDP Gateway ----
+    TEST_SUITE("UdpGateway");
+    RUN_TEST(test_udp_publish_receive_roundtrip);
+    RUN_TEST(test_udp_header_format);
 
 #ifdef HFT_HAS_QDP
     // ---- QDP gateway smoke ----

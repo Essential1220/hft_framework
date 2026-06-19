@@ -658,10 +658,11 @@ bool parse_kline_bar_line(const std::string& line,
 
 // Aggregate a single tick into all period bars (1m/5m/15m/1d) — hot path called from consumer loop.
 // (将单个 tick 聚合到所有周期 K 线中 1m/5m/15m/1d — 热路径, 从消费者循环调用)
-void KlineManager::update_from_tick(const TickData& tick) {
+std::vector<CompletedBar> KlineManager::update_from_tick(const TickData& tick) {
+    std::vector<CompletedBar> completed;
     const std::string instrument = tick.instrument_id;
     if (instrument.empty() || tick.last_price <= 0.0) {
-        return;
+        return completed;
     }
 
     const char* raw_day = tick.action_day[0] != '\0' ? tick.action_day : tick.trading_day;
@@ -669,7 +670,7 @@ void KlineManager::update_from_tick(const TickData& tick) {
     const std::string update_time = tick.update_time;
     const int64_t timestamp_ms = local_date_time_to_epoch_ms(trade_day, update_time, tick.update_millisec);
     if (timestamp_ms <= 0) {
-        return;
+        return completed;
     }
 
     std::lock_guard<std::mutex> lock(mtx_);
@@ -699,14 +700,28 @@ void KlineManager::update_from_tick(const TickData& tick) {
             ? trading_day_to_bucket_ms(tick.trading_day)
             : bucket_start_ms(timestamp_ms, period);
         if (bar_ts <= 0) continue;
+
+        auto& bars = state.bars_by_period[period];
+        const bool new_bar = bars.empty() || bars.back().timestamp_ms != bar_ts;
+
+        if (new_bar && !bars.empty()) {
+            CompletedBar cb;
+            cb.instrument = instrument;
+            cb.period = period;
+            cb.bar = bars.back();
+            completed.push_back(std::move(cb));
+        }
+
         append_or_update_bar(
-            &state.bars_by_period[period],
+            &bars,
             bar_ts,
             period,
             tick.last_price,
             volume_delta,
             turnover_delta);
     }
+
+    return completed;
 }
 
 // Check if it's time to persist K-line data; actual write is triggered by the async save loop.

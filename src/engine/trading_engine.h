@@ -20,11 +20,16 @@
 #include "engine/strategy_controller.h"
 #include "engine/tick_data_manager.h"
 #include "engine/tick_recorder.h"
+#include "market/order_book_manager.h"
 #include "gateway/i_md_gateway.h"
 #include "order/close_manager.h"
 #include "order/conditional_order_manager.h"
 #include "order/algo_order_manager.h"
 #include "engine/paper_trading.h"
+
+#ifdef ENABLE_METRICS
+#include "webui/web_server.h"
+#endif
 
 #include <array>
 #include <atomic>
@@ -35,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -264,6 +270,18 @@ public:
     int get_net_position(const char* instrument) const;
     int get_net_position(const char* instrument, const std::string& account_id) const override;
 
+    WindowedOrderBook get_order_book(const char* instrument) const override;
+    AccountInfo get_account_info(const std::string& account_id) const override;
+    void strategy_log(const std::string& strategy_id, int level, const std::string& message) override;
+    void save_strategy_state(const std::string& strategy_id,
+                             const std::map<std::string, std::string>& state) override;
+    std::map<std::string, std::string> load_strategy_state(const std::string& strategy_id) override;
+    int register_timer(const std::string& strategy_id, int interval_ms) override;
+    void unregister_timer(int timer_id) override;
+    std::vector<KlineBar> query_klines(const std::string& instrument,
+                                        const std::string& period,
+                                        size_t count) const override;
+
     const Config& get_config() const { return config_; }
     const std::string& get_config_path() const { return config_path_; }
     void set_config_store(ConfigStore* store) { store_ = store; }
@@ -370,9 +388,9 @@ private:
     std::atomic<long long> next_active_orders_refresh_ms_{0};
     mutable std::mutex alerts_mtx_;
     std::deque<std::string> recent_alerts_;
-    mutable std::mutex trades_mtx_;
+    mutable std::shared_mutex trades_mtx_;
     std::deque<TradeInfo> recent_trades_;
-    mutable std::mutex orders_history_mtx_;
+    mutable std::shared_mutex orders_history_mtx_;
     std::deque<OrderInfo> recent_orders_;
     mutable std::mutex pnl_curve_mtx_;
     std::deque<PnlCurvePoint> pnl_curve_;
@@ -404,7 +422,7 @@ private:
     static constexpr size_t kOrderLatencyRingCap = 512;
     std::array<OrderLatencyEntry, kOrderLatencyRingCap> order_latency_ring_{};
     size_t order_latency_ring_head_ = 0;
-    mutable std::mutex latency_mtx_;
+    // latency_mtx_ removed: ring is only accessed from consumer thread
     std::atomic<bool> queue_overflow_detected_{false}; // 交易队列溢出标记
     std::atomic<bool> trade_queue_overflow_detected_{false};
     std::atomic<bool> md_queue_overflow_detected_{false};
@@ -417,6 +435,9 @@ private:
     bool hft_disable_kline_hot_path_ = false;
     bool hft_strategy_hot_instruments_only_ = true;
     size_t md_batch_size_ = 1;
+    int engine_cpu_core_ = -1;
+    int gateway_cpu_core_ = -1;
+    int logger_cpu_core_ = -1;
 
     static constexpr size_t kQueueSize = 65536;
     SPSCQueue<Event, kQueueSize> md_queue_;
@@ -455,6 +476,20 @@ private:
     bool was_running_before_reconnect_ = false;
 
     TickDataManager tick_data_mgr_;
+    OrderBookManager order_book_mgr_;
+
+    struct TimerEntry {
+        int id;
+        int interval_ms;
+        std::string strategy_id;
+        std::chrono::steady_clock::time_point next_fire;
+    };
+    std::vector<TimerEntry> timers_;
+    std::atomic<int> next_timer_id_{1};
+
+#ifdef ENABLE_METRICS
+    WebServer web_server_;
+#endif
 
     std::chrono::steady_clock::time_point start_time_;
     std::atomic<uint32_t> last_cond_id_{0};

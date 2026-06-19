@@ -6,6 +6,7 @@
 #include "common/types.h"
 #include "common/config.h"
 
+#include <stdexcept>
 #include <string>
 
 extern void TEST_SUITE(const char*);

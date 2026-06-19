@@ -7,10 +7,12 @@
 
 #include "engine/trading_engine.h"
 
+#include "common/branch_hints.h"
 #include "common/logger.h"
 #include "common/binary_io.h"
 #include "common/crypto.h"
 #include "common/string_utils.h"
+#include "common/thread_utils.h"
 #include "engine/account_config.h"
 #include "strategy/strategy_base.h"
 #include "strategy/strategy_config.h"
@@ -488,7 +490,7 @@ if (!account_mgr_.init(config_, this)) {
     }
     // Account manager
 for (auto* ctx : account_mgr_.all_accounts()) {
-        ctx->risk_mgr.init(config_, &ctx->position_mgr, &ctx->order_mgr, ctx->account_id);
+        ctx->risk_mgr.init(config_, &ctx->position_mgr, &ctx->order_mgr, &tick_data_mgr_, ctx->account_id);
     }
     // Configuration
     runtime_state_path_ = config_.get_string("Runtime", "StateFile", "runtime_state.dat");
@@ -514,6 +516,14 @@ for (auto* ctx : account_mgr_.all_accounts()) {
             tick_recorder_.set_path(tick_path);
         }
         tick_recorder_.set_alert_callback([this](const std::string& msg) { record_alert(msg); });
+        const std::string storage_mode_str = config_.get_string("TickRecording", "StorageMode", "stream");
+        if (storage_mode_str == "mmap") {
+            tick_recorder_.set_storage_mode(TickStorageMode::Mmap);
+            tick_recorder_.set_mmap_max_ticks(
+                static_cast<size_t>(config_.get_int("TickRecording", "MmapMaxTicks", 5000000)));
+            LOG_INFO("tick recording: mmap mode, max_ticks=" +
+                     std::to_string(config_.get_int("TickRecording", "MmapMaxTicks", 5000000)));
+        }
     }
     session_mgr_.apply_monitoring_config(
         config_.get_int("Runtime", "NoTickWarnSeconds", 10),
@@ -575,7 +585,7 @@ bool TradingEngine::start() {
         for (auto* ctx : account_mgr_.all_accounts()) {
             set_account_trade_state(ctx, AccountTradeState::Booting);
             clear_account_reject_state(ctx);
-            ctx->risk_mgr.init(config_, &ctx->position_mgr, &ctx->order_mgr, ctx->account_id);
+            ctx->risk_mgr.init(config_, &ctx->position_mgr, &ctx->order_mgr, &tick_data_mgr_, ctx->account_id);
         }
 
         runtime_state_path_ = config_.get_string("Runtime", "StateFile", "runtime_state.dat");
@@ -599,6 +609,12 @@ bool TradingEngine::start() {
 
     consumer_thread_ = std::thread(&TradingEngine::consumer_loop, this);
     thread_registry_->add("consumer_loop", &consumer_thread_, nullptr, 5);
+    if (engine_cpu_core_ >= 0) {
+        if (set_thread_affinity(consumer_thread_, engine_cpu_core_))
+            LOG_INFO("consumer_loop bound to core " + std::to_string(engine_cpu_core_));
+        else
+            LOG_WARN("failed to bind consumer_loop to core " + std::to_string(engine_cpu_core_));
+    }
 
     watchdog_thread_ = std::thread(guarded_run("watchdog", [this]() {
         const auto heartbeat_path = std::filesystem::path(config_path_).parent_path() / "heartbeat";
@@ -631,6 +647,16 @@ bool TradingEngine::start() {
     tick_recording_thread_ = std::thread(guarded_run("tick_recording", [this]() { tick_recorder_.writer_loop(); }));
     thread_registry_->add("tick_recording", &tick_recording_thread_,
         [this]() { tick_recorder_.stop_writer(); }, 5);
+
+    if (logger_cpu_core_ >= 0) {
+        auto& logger_thread = AsyncLogger::instance().worker_thread();
+        if (logger_thread.joinable()) {
+            if (set_thread_affinity(logger_thread, logger_cpu_core_))
+                LOG_INFO("logger thread bound to core " + std::to_string(logger_cpu_core_));
+            else
+                LOG_WARN("failed to bind logger thread to core " + std::to_string(logger_cpu_core_));
+        }
+    }
 
     auto fail_startup = [this](const std::string& reason) {
         LOG_ERROR(reason);
@@ -941,10 +967,24 @@ try_refresh_active_orders(); // Attempt to refresh active orders (尝试刷新�
 
     LOG_INFO("引擎启动完成");
     engine_start_trace("start:done");
+
+#ifdef ENABLE_METRICS
+    {
+        int metrics_port = config_.get_int("Metrics", "Port", 9090);
+        bool enable_control = config_.get_int("WebUI", "EnableControl", 0) != 0;
+        if (metrics_port > 0) {
+            web_server_.start(metrics_port, this, enable_control);
+        }
+    }
+#endif
+
     return true;
 }
 
 void TradingEngine::stop() {
+#ifdef ENABLE_METRICS
+    web_server_.stop();
+#endif
     strategy_ctrl_.set_global_state(StrategyState::Stopped); // Set strategy state to stopped (设置策略状态为停止)
     trading_ready_.store(false, std::memory_order_relaxed); // Set trade ready state to false (设置交易状态为未就绪)
 if (running_) {
@@ -991,9 +1031,11 @@ bool TradingEngine::add_strategy(std::shared_ptr<StrategyBase> strategy) {
             strategy->on_init();
         } catch (const std::exception& e) {
             LOG_ERROR("strategy hotload on_init failed: id=" + new_id + " error=" + e.what());
+            strategy->set_engine(nullptr);
             return false;
         } catch (...) {
             LOG_ERROR("strategy hotload on_init unknown failure: id=" + new_id);
+            strategy->set_engine(nullptr);
             return false;
         }
     }
@@ -1365,12 +1407,18 @@ void TradingEngine::apply_runtime_performance_config() {
     hft_strategy_hot_instruments_only_ =
         config_.get_int("Performance", "StrategyHotInstrumentsOnly", 1) > 0;
 
+    engine_cpu_core_ = config_.get_int("Performance", "EngineCpuCore", -1);
+    gateway_cpu_core_ = config_.get_int("Performance", "GatewayCoreId", -1);
+    logger_cpu_core_ = config_.get_int("Performance", "LoggerCpuCore", -1);
+
     LOG_INFO("performance config: production_hft=" + std::to_string(production_hft_mode_ ? 1 : 0) +
              " md_batch_size=" + std::to_string(md_batch_size_) +
              " disable_python_hot_path=" + std::to_string(hft_disable_python_hot_path_ ? 1 : 0) +
              " disable_tick_recording_hot_path=" + std::to_string(hft_disable_tick_recording_ ? 1 : 0) +
              " disable_kline_hot_path=" + std::to_string(hft_disable_kline_hot_path_ ? 1 : 0) +
-             " strategy_hot_instruments_only=" + std::to_string(hft_strategy_hot_instruments_only_ ? 1 : 0));
+             " strategy_hot_instruments_only=" + std::to_string(hft_strategy_hot_instruments_only_ ? 1 : 0) +
+             " engine_cpu_core=" + std::to_string(engine_cpu_core_) +
+             " logger_cpu_core=" + std::to_string(logger_cpu_core_));
 }
 
 // Consumer loop
@@ -1442,6 +1490,29 @@ while (running_) {
             algo_order_mgr_.tick([this](const OrderRequest& req) {
                 return send_order_with_result(req);
             });
+
+            // Check strategy timers
+            if (!timers_.empty()) {
+                auto snapshot = load_strategies_snapshot();
+                for (auto& timer : timers_) {
+                    if (now >= timer.next_fire) {
+                        timer.next_fire = now + std::chrono::milliseconds(timer.interval_ms);
+                        if (snapshot) {
+                            for (auto& s : *snapshot) {
+                                if (s->strategy_id() == timer.strategy_id) {
+                                    try {
+                                        s->on_timer(timer.id);
+                                    } catch (const std::exception& e) {
+                                        LOG_ERROR("[" + timer.strategy_id + "] on_timer exception: " + e.what());
+                                        auto_pause_on_error(timer.strategy_id);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (now - last_pnl_snapshot >= std::chrono::seconds(60)) {
             last_pnl_snapshot = now;
@@ -1449,7 +1520,7 @@ while (running_) {
         }
 
         // 4. 如果没有事件处理，执行后台任务并稍作休眠
-        if (!got_event) {
+        if (HFT_UNLIKELY(!got_event)) {
             try_refresh_active_orders();
             ++idle_spins;
             if (session_mgr_.last_in_trading_session()) {
@@ -1507,13 +1578,13 @@ void TradingEngine::auto_pause_on_error(const std::string& strategy_id) {
 
 void TradingEngine::process_tick(const TickData& tick) {
     // ZT-05: Basic tick data validation to filter corrupt CTP data
-    if (tick.instrument_id[0] == '\0' ||
+    if (HFT_UNLIKELY(tick.instrument_id[0] == '\0' ||
         !std::isfinite(tick.last_price) || tick.last_price <= 0.0 ||
-        tick.volume < 0) {
+        tick.volume < 0)) {
         return;
     }
-    if (tick.upper_limit > 0.0 && tick.last_price > tick.upper_limit * 1.01) return;
-    if (tick.lower_limit > 0.0 && tick.last_price < tick.lower_limit * 0.99) return;
+    if (HFT_UNLIKELY(tick.upper_limit > 0.0 && tick.last_price > tick.upper_limit * 1.01)) return;
+    if (HFT_UNLIKELY(tick.lower_limit > 0.0 && tick.last_price < tick.lower_limit * 0.99)) return;
 
     const long long process_start_us = steady_us_now();
     processed_tick_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1521,13 +1592,14 @@ void TradingEngine::process_tick(const TickData& tick) {
     // Hot path: only do necessary tick caching and conditional order checks; move rest outside lock.
     // (热路径: 只做必要的 tick 缓存和条件单检查, 其余移到锁外)
     tick_data_mgr_.update(tick);
+    order_book_mgr_.update(tick);
 
     // Update the last tick receive timestamp.
     session_mgr_.update_last_tick_time();
     session_mgr_.set_no_tick_alerted(false);
 
     const bool hot = is_hot_instrument(tick.instrument_id);
-    if (!hot && hft_strategy_hot_instruments_only_) {
+    if (HFT_UNLIKELY(!hot && hft_strategy_hot_instruments_only_)) {
         const long long process_elapsed_us = (std::max)(0LL, steady_us_now() - process_start_us);
         last_tick_process_us_.store(process_elapsed_us, std::memory_order_relaxed);
         return;
@@ -1558,10 +1630,6 @@ void TradingEngine::process_tick(const TickData& tick) {
         auto strategies_snapshot = load_strategies_snapshot();
         const bool need_per_strategy_state =
             strategy_ctrl_.non_running_count() > 0;
-        std::unordered_map<std::string, StrategyState> states_snapshot;
-        if (need_per_strategy_state) {
-            states_snapshot = strategy_ctrl_.snapshot_states();
-        }
 
         // GIL batch: acquire interpreter lock once for all Python strategies
         std::unique_ptr<StrategyBase::InterpreterLockGuard> interp_lock;
@@ -1582,10 +1650,9 @@ void TradingEngine::process_tick(const TickData& tick) {
                 continue;
             }
             if (need_per_strategy_state) {
-                const std::string& strategy_id =
+                const std::string& sid =
                     strategy->strategy_id().empty() ? kDefaultStrategyId : strategy->strategy_id();
-                const auto state_it = states_snapshot.find(strategy_id);
-                if (state_it != states_snapshot.end() && state_it->second != StrategyState::Running) {
+                if (strategy_ctrl_.get_state(sid) != StrategyState::Running) {
                     continue;
                 }
             }
@@ -1607,17 +1674,39 @@ void TradingEngine::process_tick(const TickData& tick) {
 
     // Full-path: include kline/tick-recording in measured latency unless production mode removes them.
     if (!hft_disable_kline_hot_path_) {
-        kline_mgr_.update_from_tick(tick);
-        kline_mgr_.maybe_persist(steady_us_now());
+        auto completed_bars = kline_mgr_.update_from_tick(tick);
+        kline_mgr_.maybe_persist(process_start_us);
+
+        if (!completed_bars.empty() && !md_only_mode_.load(std::memory_order_relaxed)
+            && strategy_ctrl_.get_global_state() == StrategyState::Running) {
+            auto bar_snapshot = load_strategies_snapshot();
+            if (bar_snapshot) {
+                for (const auto& cb : completed_bars) {
+                    for (auto& strategy : *bar_snapshot) {
+                        if (!strategy->handles_instrument(cb.instrument.c_str())) continue;
+                        if (strategy_ctrl_.get_state(strategy->strategy_id()) != StrategyState::Running) continue;
+                        try {
+                            strategy->on_bar(cb.instrument, cb.period, cb.bar);
+                        } catch (const std::exception& e) {
+                            LOG_ERROR("on_bar exception: strategy=" + strategy->strategy_id() +
+                                      " instrument=" + cb.instrument + " period=" + cb.period +
+                                      " error=" + e.what());
+                            auto_pause_on_error(strategy->strategy_id());
+                        }
+                    }
+                }
+            }
+        }
     }
     if (!hft_disable_tick_recording_) {
         tick_recorder_.record(tick);
     }
 
-    const long long process_elapsed_us = (std::max)(0LL, steady_us_now() - process_start_us);
+    const long long end_us = steady_us_now();
+    const long long process_elapsed_us = (std::max)(0LL, end_us - process_start_us);
     last_tick_process_us_.store(process_elapsed_us, std::memory_order_relaxed);
     last_tick_to_signal_us_.store(process_elapsed_us, std::memory_order_relaxed);
-    last_signal_steady_us_.store(steady_us_now(), std::memory_order_relaxed);
+    last_signal_steady_us_.store(end_us, std::memory_order_relaxed);
 }
 
 void TradingEngine::process_order(const OrderInfo& order) {
@@ -1633,12 +1722,11 @@ void TradingEngine::process_order(const OrderInfo& order) {
     ctx->order_mgr.on_order_return(routed_order);
     ctx->order_mgr.enrich_order_info(routed_order);
     close_mgr_.on_order(routed_order);
-    // Block
-    if (store_) {
+    if (store_ && !production_hft_mode_) {
         store_->async_update_order(routed_order);
     }
     {
-        std::lock_guard<std::mutex> lock(orders_history_mtx_);
+        std::unique_lock<std::shared_mutex> lock(orders_history_mtx_);
         recent_orders_.push_front(routed_order);
         while (recent_orders_.size() > 1000) {
             recent_orders_.pop_back();
@@ -1650,28 +1738,25 @@ void TradingEngine::process_order(const OrderInfo& order) {
         ctx->risk_mgr.on_cancel();
     }
 
-    std::vector<std::shared_ptr<StrategyBase>> strategies_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(strategies_mtx_);
-        strategies_snapshot = strategies_;
-    }
+    auto strategies_snapshot = load_strategies_snapshot();
+    if (!strategies_snapshot) return;
 
     // GIL batch: acquire interpreter lock once for all Python strategies
     std::unique_ptr<StrategyBase::InterpreterLockGuard> interp_lock;
-    for (const auto& strategy : strategies_snapshot) {
+    for (const auto& strategy : *strategies_snapshot) {
         if (strategy->is_interpreted()) {
             interp_lock = strategy->acquire_interpreter_lock();
             break;
         }
     }
 
-    if (routed_order.strategy_id[0] == '\0' && strategies_snapshot.size() > 1) {
+    if (routed_order.strategy_id[0] == '\0' && strategies_snapshot->size() > 1) {
         LOG_WARN("skip unscoped order callback in multi-strategy mode: ref=" +
                  std::string(routed_order.order_ref) +
                  " instrument=" + std::string(routed_order.instrument_id) +
                  " acct=" + ctx->account_id);
     } else {
-        for (auto& strategy : strategies_snapshot) {
+        for (const auto& strategy : *strategies_snapshot) {
             if (!strategy->handles_strategy(routed_order.strategy_id)) {
                 continue;
             }
@@ -1710,8 +1795,7 @@ void TradingEngine::process_trade(const TradeInfo& trade) {
     ctx->position_mgr.on_trade(routed_trade);
     close_mgr_.on_trade(routed_trade);
     algo_order_mgr_.on_trade(std::string(routed_trade.order_ref), routed_trade.volume);
-    // Block
-    if (store_) {
+    if (store_ && !production_hft_mode_) {
         store_->async_insert_trade(routed_trade);
     }
     {
@@ -1724,16 +1808,11 @@ void TradingEngine::process_trade(const TradeInfo& trade) {
         strategy_ctrl_.record_open_position(strategy_id, trade_time);
     }
     {
-        // Ring scan to find matching order_ref: on hit, clear slot to mark consumed, avoiding duplicate match.
-        // In-flight order count is far less than ring capacity; typically hit is near head, break early.
-        // (环形扫描查找匹配 order_ref: 命中后清空槽位标记已消费, 避免重复匹配。
-        //  在途单数远小于 ring 容量, 典型情况下命中槽位接近 head 附近, 提前 break。)
-        std::lock_guard<std::mutex> lock(latency_mtx_);
         for (auto& entry : order_latency_ring_) {
             if (entry.order_ref[0] != '\0' &&
                 std::strncmp(entry.order_ref, routed_trade.order_ref, sizeof(entry.order_ref)) == 0) {
                 last_order_to_trade_us_.store(
-                    (std::max)(0LL, steady_us_now() - entry.sent_us),
+                    (std::max)(0LL, process_start_us - entry.sent_us),
                     std::memory_order_relaxed);
                 entry.order_ref[0] = '\0';
                 break;
@@ -1741,7 +1820,7 @@ void TradingEngine::process_trade(const TradeInfo& trade) {
         }
     }
     {
-        std::lock_guard<std::mutex> lock(trades_mtx_);
+        std::unique_lock<std::shared_mutex> lock(trades_mtx_);
         recent_trades_.push_front(routed_trade);
         while (recent_trades_.size() > 500) {
             recent_trades_.pop_back();
@@ -1749,28 +1828,29 @@ void TradingEngine::process_trade(const TradeInfo& trade) {
     }
     request_async_save();  // Async save, don't block hot path (异步保存, 不阻塞热路径)
 
-    std::vector<std::shared_ptr<StrategyBase>> strategies_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(strategies_mtx_);
-        strategies_snapshot = strategies_;
+    auto strategies_snap = load_strategies_snapshot();
+    if (!strategies_snap) {
+        last_trade_process_us_.store((std::max)(0LL, steady_us_now() - process_start_us),
+                                     std::memory_order_relaxed);
+        return;
     }
 
     // GIL batch: acquire interpreter lock once for all Python strategies
     std::unique_ptr<StrategyBase::InterpreterLockGuard> interp_lock;
-    for (const auto& strategy : strategies_snapshot) {
+    for (const auto& strategy : *strategies_snap) {
         if (strategy->is_interpreted()) {
             interp_lock = strategy->acquire_interpreter_lock();
             break;
         }
     }
 
-    if (routed_trade.strategy_id[0] == '\0' && strategies_snapshot.size() > 1) {
+    if (routed_trade.strategy_id[0] == '\0' && strategies_snap->size() > 1) {
         LOG_WARN("skip unscoped trade callback in multi-strategy mode: instrument=" +
                  std::string(routed_trade.instrument_id) +
                  " trade_id=" + std::string(routed_trade.trade_id) +
                  " acct=" + ctx->account_id);
     } else {
-        for (auto& strategy : strategies_snapshot) {
+        for (const auto& strategy : *strategies_snap) {
             if (!strategy->handles_strategy(routed_trade.strategy_id)) {
                 continue;
             }
@@ -1856,7 +1936,7 @@ void TradingEngine::snapshot_pnl_curve() {
 #ifdef _WIN32
         localtime_s(&tm_buf, &now);
 #else
-        localtime_r(&tm_buf, &now);
+        localtime_r(&now, &tm_buf);
 #endif
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
@@ -1993,17 +2073,17 @@ void TradingEngine::send_order_unlocked(const OrderRequest& req, std::string& ou
         if (out_reject_message) *out_reject_message = message;
     };
 
-    if (req.instrument_id[0] == '\0') {
+    if (HFT_UNLIKELY(req.instrument_id[0] == '\0')) {
         LOG_ERROR("send_order rejected: empty instrument_id");
         set_reject("InvalidParam", "empty instrument_id");
         return;
     }
-    if (req.volume <= 0) {
+    if (HFT_UNLIKELY(req.volume <= 0)) {
         LOG_ERROR("send_order rejected: invalid volume=" + std::to_string(req.volume));
         set_reject("InvalidParam", "invalid volume=" + std::to_string(req.volume));
         return;
     }
-    if (req.price_type == OrderRequest::PriceType::Limit && req.price <= 0.0) {
+    if (HFT_UNLIKELY(req.price_type == OrderRequest::PriceType::Limit && req.price <= 0.0)) {
         LOG_ERROR("send_order rejected: limit order with invalid price=" + std::to_string(req.price));
         set_reject("InvalidParam", "limit order with invalid price");
         return;
@@ -2150,18 +2230,14 @@ const OrderInfo order = ctx->order_mgr.create_order(actual_req);
         return;
     }
 
-    //
     const long long now_us = steady_us_now();
     const long long signal_us = last_signal_steady_us_.load(std::memory_order_relaxed);
     if (signal_us > 0) {
         last_signal_to_order_us_.store((std::max)(0LL, now_us - signal_us), std::memory_order_relaxed);
     }
     {
-        // Write at ring position head, auto-overwrite oldest entry; no heap allocation, no RB-tree rebalance.
-        // (写入环形位置 head, 自动覆盖最老条目; 无堆分配、无 RB-tree 重平衡。)
-        std::lock_guard<std::mutex> lock(latency_mtx_);
         auto& slot = order_latency_ring_[order_latency_ring_head_];
-        std::strncpy(slot.order_ref, order_ref.c_str(), sizeof(slot.order_ref) - 1);
+        std::strncpy(slot.order_ref, order.order_ref, sizeof(slot.order_ref) - 1);
         slot.order_ref[sizeof(slot.order_ref) - 1] = '\0';
         slot.sent_us = now_us;
         order_latency_ring_head_ = (order_latency_ring_head_ + 1) % kOrderLatencyRingCap;
@@ -2169,7 +2245,6 @@ const OrderInfo order = ctx->order_mgr.create_order(actual_req);
     clear_account_reject_state(ctx);
     out_order_ref = order_ref;
     if (actual_req.strategy_id[0] != '\0') {
-        const std::string strategy_id(actual_req.strategy_id);
         char sig_buf[128];
         std::snprintf(sig_buf, sizeof(sig_buf), "%s%s %s %d手 @%.2f ref=%s",
                       direction_text(actual_req.direction),
@@ -2177,11 +2252,10 @@ const OrderInfo order = ctx->order_mgr.create_order(actual_req);
                       actual_req.instrument_id,
                       actual_req.volume,
                       actual_req.price,
-                      order_ref.c_str());
-        strategy_ctrl_.record_signal(strategy_id, sig_buf, now_time_text());
+                      order.order_ref);
+        strategy_ctrl_.record_signal(actual_req.strategy_id, sig_buf, now_time_text());
     }
-    // Block
-    if (store_) {
+    if (store_ && !production_hft_mode_) {
         store_->async_insert_order(order, "manual");
     }
 }
@@ -2607,6 +2681,65 @@ int TradingEngine::get_net_position(const char* instrument, const std::string& a
     return net;
 }
 
+WindowedOrderBook TradingEngine::get_order_book(const char* instrument) const {
+    return order_book_mgr_.get_book(instrument);
+}
+
+AccountInfo TradingEngine::get_account_info(const std::string& account_id) const {
+    return account_mgr_.get_account(account_id);
+}
+
+void TradingEngine::strategy_log(const std::string& strategy_id, int level, const std::string& message) {
+    const std::string prefixed = "[" + strategy_id + "] " + message;
+    switch (level) {
+        case 0:  LOG_INFO(prefixed);  break;
+        case 1:  LOG_WARN(prefixed);  break;
+        default: LOG_ERROR(prefixed); break;
+    }
+}
+
+void TradingEngine::save_strategy_state(const std::string& strategy_id,
+                                         const std::map<std::string, std::string>& state) {
+    if (!store_) return;
+    for (const auto& [k, v] : state) {
+        store_->save_system_config("strategy_state." + strategy_id + "." + k, v);
+    }
+}
+
+std::map<std::string, std::string> TradingEngine::load_strategy_state(const std::string& strategy_id) {
+    std::map<std::string, std::string> result;
+    if (!store_) return result;
+    const std::string prefix = "strategy_state." + strategy_id + ".";
+    for (const auto& [k, v] : store_->load_system_config_by_prefix(prefix)) {
+        result[k] = v;
+    }
+    return result;
+}
+
+int TradingEngine::register_timer(const std::string& strategy_id, int interval_ms) {
+    const int id = next_timer_id_.fetch_add(1, std::memory_order_relaxed);
+    TimerEntry entry;
+    entry.id = id;
+    entry.interval_ms = interval_ms;
+    entry.strategy_id = strategy_id;
+    entry.next_fire = std::chrono::steady_clock::now() + std::chrono::milliseconds(interval_ms);
+    timers_.push_back(std::move(entry));
+    return id;
+}
+
+void TradingEngine::unregister_timer(int timer_id) {
+    timers_.erase(
+        std::remove_if(timers_.begin(), timers_.end(),
+                        [timer_id](const TimerEntry& e) { return e.id == timer_id; }),
+        timers_.end());
+}
+
+std::vector<KlineBar> TradingEngine::query_klines(const std::string& instrument,
+                                                    const std::string& period,
+                                                    size_t count) const {
+    return kline_mgr_.get_bars(instrument, period, count);
+}
+
 // Block
 void TradingEngine::pause_strategy() {
     EngineCommand cmd{};
@@ -2906,7 +3039,7 @@ std::vector<TradeInfo> TradingEngine::get_recent_trades(const std::string& accou
     limit = (std::max)(size_t{1}, (std::min)(limit, size_t{500}));
 
     std::vector<TradeInfo> trades;
-    std::lock_guard<std::mutex> lock(trades_mtx_);
+    std::shared_lock<std::shared_mutex> lock(trades_mtx_);
     for (const auto& trade : recent_trades_) {
         if (!account_filter.empty() && account_filter != trade.account_id) {
             continue;
@@ -2924,7 +3057,7 @@ std::vector<OrderInfo> TradingEngine::get_recent_orders(const std::string& accou
     limit = (std::max)(size_t{1}, (std::min)(limit, size_t{1000}));
 
     std::vector<OrderInfo> orders;
-    std::lock_guard<std::mutex> lock(orders_history_mtx_);
+    std::shared_lock<std::shared_mutex> lock(orders_history_mtx_);
     for (const auto& order : recent_orders_) {
         if (!account_filter.empty() && account_filter != order.account_id) {
             continue;

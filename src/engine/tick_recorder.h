@@ -13,11 +13,15 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace hft {
+
+class MmapTickWriter;
+enum class TickStorageMode { Stream, Mmap };
 
 struct TickRecordingStatus {
     bool enabled = false;
@@ -31,11 +35,16 @@ struct TickRecordingStatus {
 
 class TickRecorder {
 public:
+    TickRecorder();
+    ~TickRecorder();
+
     using AlertCallback = std::function<void(const std::string&)>;
 
     void set_alert_callback(AlertCallback cb) { alert_cb_ = std::move(cb); }
     void set_path(const std::filesystem::path& path) { path_ = path; }
     const std::filesystem::path& path() const { return path_; }
+    void set_storage_mode(TickStorageMode mode) { storage_mode_ = mode; }
+    void set_mmap_max_ticks(size_t max_ticks) { mmap_max_ticks_ = max_ticks; }
 
     void writer_loop();
     void stop_writer();
@@ -63,8 +72,15 @@ private:
     std::filesystem::path file_for(const TickData& tick) const;
     std::vector<std::filesystem::path> collect_files(const std::string& instrument) const;
 
+    bool write_to_mmap(const TickData& tick);
+    void ensure_mmap_open(const TickData& tick);
+
     AlertCallback alert_cb_;
     std::filesystem::path path_ = "tick_records.dat";
+    TickStorageMode storage_mode_ = TickStorageMode::Stream;
+    size_t mmap_max_ticks_ = 5000000;
+    std::unique_ptr<MmapTickWriter> mmap_writer_;
+    std::string mmap_current_day_;
     std::atomic<bool> enabled_{false};
     std::atomic<bool> active_{false};
     mutable std::mutex file_mtx_;

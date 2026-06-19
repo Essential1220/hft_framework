@@ -5,6 +5,7 @@
 #include "engine/tick_data_manager.h"
 
 #include <algorithm>
+#include <mutex>
 
 namespace hft {
 

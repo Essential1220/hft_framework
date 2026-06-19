@@ -3,8 +3,9 @@
 #include "common/spsc_queue.h"
 #include "common/event.h"
 #include <chrono>
-#include <thread>
 #include <cstdio>
+#include <stdexcept>
+#include <thread>
 
 // 从 test_main.cpp 引入 (imported from test_main.cpp)
 extern void TEST_SUITE(const char*);

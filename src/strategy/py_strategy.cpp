@@ -170,6 +170,66 @@ PYBIND11_EMBEDDED_MODULE(hft_engine, m) {
               return py::dict();
           },
           "Query loaded strategy context");
+
+    m.def("log_info", [](const std::string& msg) {
+        if (hft::g_current_py_strategy) hft::g_current_py_strategy->py_log_info(msg);
+    }, "Log info message");
+
+    m.def("log_warn", [](const std::string& msg) {
+        if (hft::g_current_py_strategy) hft::g_current_py_strategy->py_log_warn(msg);
+    }, "Log warning message");
+
+    m.def("log_error", [](const std::string& msg) {
+        if (hft::g_current_py_strategy) hft::g_current_py_strategy->py_log_error(msg);
+    }, "Log error message");
+
+    m.def("save_state", [](py::dict state) {
+        if (hft::g_current_py_strategy) hft::g_current_py_strategy->py_save_state(state);
+    }, "Save strategy state to persistent storage");
+
+    m.def("load_state", []() -> py::dict {
+        if (hft::g_current_py_strategy) return hft::g_current_py_strategy->py_load_state();
+        return py::dict();
+    }, "Load strategy state from persistent storage");
+
+    m.def("get_account_info",
+          [](const std::string& account_id) -> py::dict {
+              if (hft::g_current_py_strategy) return hft::g_current_py_strategy->py_get_account_info(account_id);
+              return py::dict();
+          },
+          py::arg("account_id") = "",
+          "Query account info");
+
+    m.def("register_timer",
+          [](int interval_ms) -> int {
+              if (hft::g_current_py_strategy) return hft::g_current_py_strategy->py_register_timer(interval_ms);
+              return -1;
+          },
+          py::arg("interval_ms"),
+          "Register a periodic timer, returns timer_id");
+
+    m.def("unregister_timer",
+          [](int timer_id) {
+              if (hft::g_current_py_strategy) hft::g_current_py_strategy->py_unregister_timer(timer_id);
+          },
+          py::arg("timer_id"),
+          "Unregister a timer by timer_id");
+
+    m.def("get_order_book",
+          [](const std::string& instrument) -> py::dict {
+              if (hft::g_current_py_strategy) return hft::g_current_py_strategy->py_get_order_book(instrument);
+              return py::dict();
+          },
+          py::arg("instrument"),
+          "Query order book snapshot for instrument");
+
+    m.def("query_klines",
+          [](const std::string& instrument, const std::string& period, size_t count) -> py::list {
+              if (hft::g_current_py_strategy) return hft::g_current_py_strategy->py_query_klines(instrument, period, count);
+              return py::list();
+          },
+          py::arg("instrument"), py::arg("period"), py::arg("count") = 200,
+          "Query historical K-line bars");
 }
 
 namespace hft {
@@ -191,6 +251,8 @@ PyStrategy::~PyStrategy() {
         fn_on_trade_ = py::object();
         fn_on_reconnect_ = py::object();
         fn_on_stop_ = py::object();
+        fn_on_bar_ = py::object();
+        fn_on_timer_ = py::object();
         script_module_ = py::module_();
         if (!module_name_.empty()) {
             py::module_ sys = py::module_::import("sys");
@@ -277,6 +339,16 @@ bool PyStrategy::load_script() {
             PyObject* attr = PyObject_GetAttrString(script_module_.ptr(), "on_stop");
             if (attr) { fn_on_stop_ = py::reinterpret_steal<py::object>(attr); }
             else { PyErr_Clear(); fn_on_stop_ = py::none(); }
+        }
+        {
+            PyObject* attr = PyObject_GetAttrString(script_module_.ptr(), "on_bar");
+            if (attr) { fn_on_bar_ = py::reinterpret_steal<py::object>(attr); }
+            else { PyErr_Clear(); fn_on_bar_ = py::none(); }
+        }
+        {
+            PyObject* attr = PyObject_GetAttrString(script_module_.ptr(), "on_timer");
+            if (attr) { fn_on_timer_ = py::reinterpret_steal<py::object>(attr); }
+            else { PyErr_Clear(); fn_on_timer_ = py::none(); }
         }
 
         loaded_ = true;
@@ -410,6 +482,48 @@ void PyStrategy::on_stop() {
         fn_on_stop_();
     } catch (const py::error_already_set& e) {
         LOG_ERROR("PyStrategy::on_stop exception: " + std::string(e.what()));
+    }
+}
+
+void PyStrategy::on_bar(const std::string& instrument, const std::string& period, const KlineBar& bar) {
+    if (!loaded_ || fn_on_bar_.is_none()) return;
+    g_current_py_strategy = this;
+
+    if (g_batch_gil_active) {
+        try {
+            fn_on_bar_(instrument, period, bar_to_dict(bar));
+        } catch (const py::error_already_set& e) {
+            LOG_ERROR("PyStrategy::on_bar exception: " + std::string(e.what()));
+        }
+        return;
+    }
+
+    py::gil_scoped_acquire gil;
+    try {
+        fn_on_bar_(instrument, period, bar_to_dict(bar));
+    } catch (const py::error_already_set& e) {
+        LOG_ERROR("PyStrategy::on_bar exception: " + std::string(e.what()));
+    }
+}
+
+void PyStrategy::on_timer(int timer_id) {
+    if (!loaded_ || fn_on_timer_.is_none()) return;
+    g_current_py_strategy = this;
+
+    if (g_batch_gil_active) {
+        try {
+            fn_on_timer_(timer_id);
+        } catch (const py::error_already_set& e) {
+            LOG_ERROR("PyStrategy::on_timer exception: " + std::string(e.what()));
+        }
+        return;
+    }
+
+    py::gil_scoped_acquire gil;
+    try {
+        fn_on_timer_(timer_id);
+    } catch (const py::error_already_set& e) {
+        LOG_ERROR("PyStrategy::on_timer exception: " + std::string(e.what()));
     }
 }
 
@@ -566,6 +680,84 @@ py::dict PyStrategy::py_get_strategy_context() {
     return d;
 }
 
+void PyStrategy::py_log_info(const std::string& msg) { log_info(msg); }
+void PyStrategy::py_log_warn(const std::string& msg) { log_warn(msg); }
+void PyStrategy::py_log_error(const std::string& msg) { log_error(msg); }
+
+void PyStrategy::py_save_state(const py::dict& state) {
+    std::map<std::string, std::string> cpp_state;
+    for (auto item : state) {
+        cpp_state[py::str(item.first).cast<std::string>()] = py::str(item.second).cast<std::string>();
+    }
+    save_state(cpp_state);
+}
+
+py::dict PyStrategy::py_load_state() {
+    py::dict d;
+    auto state = load_state();
+    for (const auto& [k, v] : state) {
+        d[py::str(k)] = py::str(v);
+    }
+    return d;
+}
+
+py::dict PyStrategy::py_get_account_info(const std::string& account_id) {
+    AccountInfo info = get_account_info(account_id);
+    py::dict d;
+    d["account_id"] = info.account_id;
+    d["balance"] = info.balance;
+    d["available"] = info.available;
+    d["margin"] = info.margin;
+    d["frozen_margin"] = info.frozen_margin;
+    d["frozen_commission"] = info.frozen_commission;
+    d["position_profit"] = info.position_profit;
+    d["close_profit"] = info.close_profit;
+    d["commission"] = info.commission;
+    return d;
+}
+
+int PyStrategy::py_register_timer(int interval_ms) {
+    return register_timer(interval_ms);
+}
+
+void PyStrategy::py_unregister_timer(int timer_id) {
+    unregister_timer(timer_id);
+}
+
+py::dict PyStrategy::py_get_order_book(const std::string& instrument) {
+    WindowedOrderBook book = get_order_book(instrument.c_str());
+    py::dict d;
+    d["instrument_id"] = book.instrument_id();
+    d["mid_price"] = book.mid_price();
+    d["spread"] = book.bid_ask_spread();
+    d["imbalance"] = book.bid_ask_imbalance();
+
+    py::list bids;
+    py::list asks;
+    for (int i = 0; i < WindowedOrderBook::kDepth; ++i) {
+        py::dict bid;
+        bid["price"] = book.bid(i).price;
+        bid["volume"] = book.bid(i).volume;
+        bids.append(bid);
+        py::dict ask;
+        ask["price"] = book.ask(i).price;
+        ask["volume"] = book.ask(i).volume;
+        asks.append(ask);
+    }
+    d["bids"] = bids;
+    d["asks"] = asks;
+    return d;
+}
+
+py::list PyStrategy::py_query_klines(const std::string& instrument, const std::string& period, size_t count) {
+    auto bars = query_klines(instrument, period, count);
+    py::list result;
+    for (const auto& bar : bars) {
+        result.append(bar_to_dict(bar));
+    }
+    return result;
+}
+
 // ---- 数据结构转换辅助函数 (C++ -> Python Dict) ----
 // 避免在 Python 端使用难以调试的 C++ 包装对象，全部退化为基础 dict
 
@@ -592,6 +784,15 @@ py::dict PyStrategy::tick_to_dict(const TickData& t) {
     d["trading_day"] = t.trading_day;
     d["action_day"] = t.action_day;
     d["local_recv_ns"] = t.local_recv_ns;
+
+    for (int i = 1; i < kMarketDepth; ++i) {
+        const std::string idx = std::to_string(i + 1);
+        d[py::str("bid_price" + idx)] = t.bid[i].price;
+        d[py::str("bid_volume" + idx)] = t.bid[i].volume;
+        d[py::str("ask_price" + idx)] = t.ask[i].price;
+        d[py::str("ask_volume" + idx)] = t.ask[i].volume;
+    }
+
     return d;
 }
 
@@ -627,6 +828,19 @@ py::dict PyStrategy::trade_to_dict(const TradeInfo& t) {
     d["trade_time"] = t.trade_time;
     d["account_id"] = t.account_id;
     d["strategy_id"] = t.strategy_id;
+    return d;
+}
+
+py::dict PyStrategy::bar_to_dict(const KlineBar& bar) {
+    py::dict d;
+    d["timestamp_ms"] = bar.timestamp_ms;
+    d["time"] = bar.time;
+    d["open"] = bar.open;
+    d["high"] = bar.high;
+    d["low"] = bar.low;
+    d["close"] = bar.close;
+    d["volume"] = bar.volume;
+    d["turnover"] = bar.turnover;
     return d;
 }
 

@@ -14,6 +14,11 @@
 #include "gateway/qdp_md_gateway.h"
 #include "gateway/qdp_trade_gateway.h"
 #endif
+#include "gateway/shm_md_gateway.h"
+#include "gateway/dual_md_gateway.h"
+#include "gateway/fix_md_gateway.h"
+#include "gateway/fix_trade_gateway.h"
+#include "gateway/udp_md_gateway.h"
 #include "strategy/simple_strategy.h"
 #include "strategy/strategy_config.h"
 #ifdef ENABLE_PYTHON
@@ -224,6 +229,18 @@ bool AppRuntime::initialize(const std::string& config_path, std::function<void()
                 return std::make_unique<QdpMdGateway>();
             }
 #endif
+            if (gateway_type == "SHM") {
+                return std::make_unique<ShmMdGateway>();
+            }
+            if (gateway_type == "FIX") {
+                return std::make_unique<FixMdGateway>();
+            }
+            if (gateway_type == "UDP") {
+                return std::make_unique<UdpMdGateway>();
+            }
+            if (gateway_type == "CTP_DUAL") {
+                return std::make_unique<DualMdGateway>();
+            }
             LOG_ERROR("unsupported md gateway type: " + gateway_type + ", falling back to CTP");
             return std::make_unique<CtpMdGateway>();
         });
@@ -323,6 +340,10 @@ bool AppRuntime::initialize(const std::string& config_path, std::function<void()
             slim.set_string("Runtime", "RunMode", cfg.get_string("Runtime", "RunMode", "service"));
             slim.set_string("Runtime", "StateFile", cfg.get_string("Runtime", "StateFile", "runtime_state.dat"));
             slim.set_string("Runtime", "NoTickWarnSeconds", cfg.get_string("Runtime", "NoTickWarnSeconds", "10"));
+            const auto global_instruments = cfg.get_string("Strategy", "Instruments", "");
+            if (!global_instruments.empty()) {
+                slim.set_string("Strategy", "Instruments", global_instruments);
+            }
             slim.save(config_path_);
 
             store_->mark_migrated();

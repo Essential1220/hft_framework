@@ -86,6 +86,7 @@ public:
     // System config (AI/alerts/Web auth etc. generic key-value) (系统配置：AI/告警/Web认证等通用 key-value)
     bool save_system_config(const std::string& key, const std::string& value);
     std::string load_system_config(const std::string& key, const std::string& default_val = "") const;
+    std::vector<std::pair<std::string, std::string>> load_system_config_by_prefix(const std::string& prefix) const;
     bool save_encrypted_system_config(const std::string& key, const std::string& value);
     std::string load_encrypted_system_config(const std::string& key, const std::string& default_val = "") const;
 

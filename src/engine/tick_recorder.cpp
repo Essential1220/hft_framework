@@ -3,6 +3,7 @@
 // ============================================
 
 #include "engine/tick_recorder.h"
+#include "engine/mmap_tick_writer.h"
 
 #include "common/binary_io.h"
 #include "common/string_utils.h"
@@ -13,6 +14,9 @@
 #include <fstream>
 
 namespace hft {
+
+TickRecorder::TickRecorder() = default;
+TickRecorder::~TickRecorder() = default;
 
 namespace {
 
@@ -194,6 +198,12 @@ bool TickRecorder::stop(std::string* error) {
     (void)error;
     active_.store(false, std::memory_order_relaxed);
     enabled_.store(false, std::memory_order_relaxed);
+    if (mmap_writer_) {
+        std::lock_guard<std::mutex> lock(file_mtx_);
+        mmap_writer_->close();
+        mmap_writer_.reset();
+        mmap_current_day_.clear();
+    }
     return true;
 }
 
@@ -253,6 +263,10 @@ void TickRecorder::record(const TickData& tick) {
 }
 
 bool TickRecorder::write_to_file(const TickData& tick) {
+    if (storage_mode_ == TickStorageMode::Mmap) {
+        return write_to_mmap(tick);
+    }
+
     std::lock_guard<std::mutex> lock(file_mtx_);
     const auto fpath = file_for(tick);
     std::error_code ec;
@@ -280,6 +294,43 @@ bool TickRecorder::write_to_file(const TickData& tick) {
             return false;
         }
     }
+    recorded_count_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void TickRecorder::ensure_mmap_open(const TickData& tick) {
+    const std::string day = tick_day_key(tick);
+    if (mmap_writer_ && mmap_current_day_ == day) return;
+
+    if (mmap_writer_) {
+        mmap_writer_->close();
+        mmap_writer_.reset();
+    }
+
+    mmap_writer_ = std::make_unique<MmapTickWriter>();
+    auto mmap_path = path_ / (day + ".mmap");
+    if (!mmap_writer_->open(mmap_path, mmap_max_ticks_)) {
+        mmap_writer_.reset();
+        active_.store(false, std::memory_order_relaxed);
+        enabled_.store(false, std::memory_order_relaxed);
+        if (alert_cb_) alert_cb_("mmap tick writer open failed: " + mmap_path.string());
+        return;
+    }
+    mmap_current_day_ = day;
+}
+
+bool TickRecorder::write_to_mmap(const TickData& tick) {
+    std::lock_guard<std::mutex> lock(file_mtx_);
+    ensure_mmap_open(tick);
+    if (!mmap_writer_ || !mmap_writer_->is_open()) return false;
+
+    if (mmap_writer_->count() >= mmap_max_ticks_) {
+        active_.store(false, std::memory_order_relaxed);
+        enabled_.store(false, std::memory_order_relaxed);
+        if (alert_cb_) alert_cb_("mmap tick storage full");
+        return false;
+    }
+    mmap_writer_->write(tick);
     recorded_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }

@@ -38,12 +38,18 @@ struct KlineCatalogItem {
     int64_t last_timestamp_ms = 0;
 };
 
+struct CompletedBar {
+    std::string instrument;
+    std::string period;
+    KlineBar bar;
+};
+
 class KlineManager {
 public:
     void set_store_path(const std::filesystem::path& path) { store_path_ = path; }
     const std::filesystem::path& store_path() const { return store_path_; }
 
-    void update_from_tick(const TickData& tick);
+    std::vector<CompletedBar> update_from_tick(const TickData& tick);
 
     void maybe_persist(long long steady_us_now);
 

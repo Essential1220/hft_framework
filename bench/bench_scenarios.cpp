@@ -313,7 +313,7 @@ HFT_BENCH(send_order_e2e) {
 
     // Init with default Config (default params sufficient for benchmark) — 用默认 Config 初始化 (默认参数足够 benchmark)
     Config dummy_cfg;
-    risk_mgr.init(dummy_cfg, &pos_mgr, &order_mgr, "bench");
+    risk_mgr.init(dummy_cfg, &pos_mgr, &order_mgr, nullptr, "bench");
 
     // Pre-populate positions so risk check has real data (预置一些持仓, 让 risk check 有东西可查)
     for (int i = 0; i < 5; ++i) {
