@@ -18,6 +18,11 @@
 10. [持仓管理器](#10-持仓管理器)
 11. [策略热加载 + pybind11](#11-策略热加载--pybind11)
 12. [凭据加密存储](#12-凭据加密存储)
+13. [REST API + WebUI](#13-rest-api--webui)
+14. [WAL 预写日志](#14-wal-预写日志)
+15. [双活网关热切换](#15-双活网关热切换)
+16. [UDP 组播与共享内存 IPC](#16-udp-组播与共享内存-ipc)
+17. [看门狗进程](#17-看门狗进程)
 
 ---
 
@@ -634,3 +639,138 @@ std::string decrypt_config_value(const std::string& value);
 
 } // namespace hft::crypto
 ```
+
+---
+
+## 13. REST API + WebUI
+
+**文件：** `src/webui/web_server.cpp`, `src/api/hft_api.h`
+
+### 决策
+
+在引擎进程内嵌一个轻量 HTTP 服务（httplib 单头文件库），提供 Prometheus `/metrics`、
+REST JSON API 和内嵌 HTML 仪表盘。不额外部署服务。
+
+### 为什么进程内嵌而不是独立服务
+
+| 方案 | 延迟数据获取 | 部署成本 | 数据一致性 |
+|------|------------|---------|-----------|
+| 进程内嵌 HTTP | 直接读引擎内存 | 零（编译即有） | 强一致 |
+| 独立 REST 服务 + IPC | 需序列化+跨进程 | 额外进程+配置 | 最终一致 |
+| 日志文件 + 外部解析 | 文件 I/O | 额外工具链 | 延迟大 |
+
+### 安全边界
+
+操作类端点（`POST /api/test_order` 等）默认关闭，需显式配置 `EnableControl=1`。
+查询端点只读引擎状态，不影响交易逻辑。HTTP 线程不持有引擎锁——通过
+`get_xxx_snapshot()` 方法获取快照副本。
+
+### C API (FFI 接口)
+
+`hft_api.h` 提供 `extern "C"` + opaque handle 模式，支持 Go/Rust/C#/Python
+等语言通过 FFI 调用引擎。查询返回堆分配 JSON，调用方需 `hft_free_string()` 释放。
+
+---
+
+## 14. WAL 预写日志
+
+**文件：** `src/common/wal_writer.h`, `src/common/uring_file_writer.cpp`
+
+### 决策
+
+关键状态变更（订单、成交、持仓快照）先写 WAL 再执行，崩溃后可从 WAL 恢复。
+Linux 使用 `io_uring` 异步写入，Windows 使用同步 `fwrite`。
+
+### 为什么 io_uring 而不是 aio/mmap
+
+| 方案 | 系统调用次数 | 内核态切换 | 批量提交 |
+|------|------------|-----------|---------|
+| `write()` | 每次 1 次 | 每次 1 次 | 不支持 |
+| POSIX `aio_write` | 每次 1 次 | 每次 1 次 | 不支持 |
+| **io_uring** | **提交+完成各 1 次** | **SQ poll 可零切换** | **支持批量** |
+
+io_uring 的 submission queue 可以攒多条写入一次提交，CQE 轮询收割完成事件，
+写 WAL 不阻塞消费者线程。
+
+### 放弃了什么
+
+Windows 没有 io_uring 等价物。Windows 路径降级为同步 `fwrite`——在 Windows
+上 WAL 写入在消费者线程阻塞，但实测 SSD 上单条写入 < 5μs，可接受。
+
+---
+
+## 15. 双活网关热切换
+
+**文件：** `src/gateway/dual_md_gateway.cpp`, `src/gateway/dual_trade_gateway.cpp`
+
+### 决策
+
+为 CTP 行情和交易各维护主备两条连接。主连接断开时自动切到备连接，
+备连接在后台持续心跳保活。
+
+### 解决什么问题
+
+CTP 前置机偶尔断连（网络抖动、前置维护）。单连接模式下断连 → 重连 → 重新登录 →
+结算确认 → 持仓同步，全流程 3-5 秒。双活模式下切换在毫秒级完成，不丢行情。
+
+### 放弃了什么
+
+多一倍的 TCP 连接和登录会话。SimNow 不限制，但实盘环境需确认券商允许同一账号
+多前置登录。
+
+---
+
+## 16. UDP 组播与共享内存 IPC
+
+**文件：** `src/gateway/udp_md_gateway.cpp`, `src/gateway/shm_md_gateway.cpp`
+
+### UDP 组播行情转发
+
+CTP 行情只能一个进程接收。通过 UDP 组播将 tick 转发到本机或局域网内多个消费者
+（策略进程、监控进程、录制进程），避免每个消费者各自连一路 CTP 行情。
+
+### 共享内存 IPC
+
+两个进程通过 `mmap` 共享内存区域 + SPSC 队列传递 tick。零拷贝、零网络栈、
+延迟 < 1μs。适用于同机多进程架构（如行情进程 + 交易进程分离）。
+
+### 为什么不用消息队列（ZMQ / Kafka）
+
+| 方案 | 延迟 | 依赖 | 适用场景 |
+|------|------|------|---------|
+| 共享内存 SPSC | < 1μs | 无 | 同机进程间 |
+| UDP 组播 | ~10μs | 无 | 局域网内 |
+| ZeroMQ | ~50μs | libzmq | 跨机 |
+| Kafka | ~ms | 集群 | 持久化消息 |
+
+低延迟场景不需要消息持久化和跨数据中心能力，共享内存和 UDP 组播足够。
+
+---
+
+## 17. 看门狗进程
+
+**文件：** `src/watchdog/watchdog_main.cpp`, `src/common/watchdog_shm.h`
+
+### 决策
+
+独立进程通过共享内存监控主进程心跳。主进程每秒更新 `last_heartbeat`，
+看门狗检测超时后可执行：日志告警、重启主进程、发送 webhook 通知。
+
+### 为什么独立进程而不是线程
+
+如果主进程死锁或 segfault，进程内的监控线程一样死掉。独立进程不受主进程
+故障影响，可以在主进程完全无响应时采取恢复措施。
+
+### 通信方式
+
+共享内存（`shm_open` / `CreateFileMapping`）+ 简单结构体：
+
+```cpp
+struct WatchdogShm {
+    std::atomic<int64_t> heartbeat_ms;   // 主进程更新
+    std::atomic<int32_t> pid;            // 主进程 PID
+    std::atomic<int32_t> status;         // 运行状态
+};
+```
+
+不用 socket/pipe——共享内存没有 I/O 开销，主进程只需一次原子 store。

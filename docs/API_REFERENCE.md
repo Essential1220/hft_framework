@@ -481,3 +481,101 @@ max_hold   = hft_engine.get_param_string("MaxHold", "1")
 | `Halted` | 熔断 | 全部订单被拦截 |
 
 **RMS 模式升级是自动的，降级是手动的。** 例如：连续亏损触发 `Normal → NoOpen`，但恢复需要运维手动执行降级命令。
+
+---
+
+## REST API
+
+启用 `[Web] Port=9090` 后，引擎会在指定端口启动 HTTP 服务，提供以下端点。
+所有响应均为 JSON 格式，支持 CORS。
+
+### 查询端点 (GET)
+
+| 端点 | 说明 | 参数 |
+|------|------|------|
+| `GET /api/status` | 引擎运行状态、风控模式、运行时间、队列丢弃数 | — |
+| `GET /api/accounts` | 所有账户快照（余额、可用、保证金、持仓盈亏） | — |
+| `GET /api/strategies` | 所有策略状态（成交数、胜率、盈亏、最近信号） | — |
+| `GET /api/latency` | 实时延迟快照（tick_to_signal、signal_to_order 等，单位 μs） | — |
+| `GET /api/ticks` | 当前订阅合约的最新 tick | — |
+| `GET /api/orders` | 最近委托列表 | `?limit=50` |
+| `GET /api/trades` | 最近成交列表 | `?limit=50` |
+| `GET /api/pnl` | 资金曲线时间序列 | `?limit=240` |
+| `GET /api/risk` | 风控实时状态（报单频率、撤单率、日内亏损等） | `?account_id=xxx` |
+| `GET /api/alerts` | 最近报警消息 | `?limit=50` |
+
+### 操作端点 (POST)
+
+需要在 `config.ini` 中设置 `[Web] EnableControl=1` 才能使用操作类端点。
+
+| 端点 | 说明 | 参数 (form body) |
+|------|------|------------------|
+| `POST /api/test_order` | 发送测试单并返回下单延迟 | `instrument`, `direction`, `price`, `volume`, `offset` |
+| `POST /api/cancel_order` | 撤销指定委托 | `order_ref`, `account_id` |
+| `POST /api/cancel_all` | 撤销全部挂单 | `account_id`（可选） |
+| `POST /api/risk/mode` | 手动切换 RMS 模式 | `mode` (0-5), `reason` |
+
+### 监控端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /metrics` | Prometheus 文本格式指标（可直接接入 Grafana） |
+| `GET /health` | 健康检查，返回 `ok` |
+| `GET /` | 内嵌 WebUI 仪表盘（HTML SPA） |
+
+### 示例
+
+```bash
+# 查看引擎状态
+curl http://localhost:9090/api/status
+
+# 查看实时延迟
+curl http://localhost:9090/api/latency
+
+# 发送测试单并测量延迟
+curl -X POST http://localhost:9090/api/test_order \
+     -d 'instrument=rb2610&direction=buy&price=3000&volume=1&offset=open'
+
+# 撤销全部挂单
+curl -X POST http://localhost:9090/api/cancel_all
+```
+
+---
+
+## C API (FFI)
+
+**头文件：** `src/api/hft_api.h`
+
+提供 `extern "C"` 接口，支持从 Go、Rust、C#、Java JNI、Python ctypes 等语言调用。
+
+### 生命周期
+
+```c
+HftEngineHandle hft_engine_create(void);
+int  hft_engine_init(HftEngineHandle h, const char* config_path);
+int  hft_engine_start(HftEngineHandle h);
+void hft_engine_stop(HftEngineHandle h);
+void hft_engine_destroy(HftEngineHandle h);
+```
+
+### 交易操作
+
+```c
+int  hft_send_order(HftEngineHandle h, const char* instrument,
+                    int direction, int offset, double price,
+                    int volume, char* out_ref, int ref_len);
+int  hft_cancel_order(HftEngineHandle h, const char* order_ref);
+int  hft_cancel_all(HftEngineHandle h, const char* account_id);
+```
+
+### 查询（返回堆分配 JSON，调用方需 `hft_free_string` 释放）
+
+```c
+char* hft_get_account(HftEngineHandle h, const char* account_id);
+char* hft_get_positions(HftEngineHandle h, const char* account_id);
+char* hft_get_active_orders(HftEngineHandle h, const char* account_id);
+char* hft_get_last_tick(HftEngineHandle h, const char* instrument);
+char* hft_get_latency(HftEngineHandle h);
+// ... 更多查询见 hft_api.h
+void  hft_free_string(char* s);  // 释放上述返回的 JSON 字符串
+```
