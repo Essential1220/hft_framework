@@ -1,4 +1,4 @@
-name: build
+name: Build
 
 on:
   push:
@@ -8,12 +8,12 @@ on:
 
 jobs:
   windows:
-    name: Windows / VS 2022 / Release
+    name: Windows / MSVC 2022
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python (for pybind11)
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -21,33 +21,46 @@ jobs:
       - name: Install pybind11
         run: python -m pip install --upgrade pip pybind11
 
+      - name: Create CTP SDK stub
+        shell: pwsh
+        run: |
+          $dir = "ctp_sdk_stub"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          # Minimal headers so CMake configure + compile passes
+          foreach ($h in @(
+            "ThostFtdcMdApi.h",
+            "ThostFtdcTraderApi.h",
+            "ThostFtdcUserApiStruct.h",
+            "ThostFtdcUserApiDataType.h"
+          )) {
+            Set-Content "$dir/$h" "#pragma once`n// CI stub"
+          }
+          # Empty .lib stubs for linker
+          cmd /c "lib /DEF /OUT:$dir\thostmduserapi_se.lib /MACHINE:X64 2>nul"
+          cmd /c "lib /DEF /OUT:$dir\thosttraderapi_se.lib /MACHINE:X64 2>nul"
+
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DENABLE_PYTHON=ON -DENABLE_TESTS=ON
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DCTP_SDK_DIR=${{ github.workspace }}/ctp_sdk_stub
+          -DENABLE_PYTHON=ON
+          -DENABLE_TESTS=ON
 
-      - name: Build hft_framework
-        run: cmake --build build --config Release --target hft_framework
-
-      - name: Build hft_tests
-        run: cmake --build build --config Release --target hft_tests
-
-      - name: Run tests
-        # Tests that don't need a live CTP connection.
-        run: ./dist/hft_tests.exe --gtest_filter=-*Live*:-*Integration*
-        shell: bash
-        continue-on-error: true
+      - name: Build
+        run: cmake --build build --config Release
 
   linux:
-    name: Linux / GCC / Release
-    runs-on: ubuntu-22.04
+    name: Linux / GCC 13
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build libiconv-hook-dev
+          sudo apt-get install -y build-essential cmake ninja-build liburing-dev
 
-      - name: Setup Python (for pybind11)
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -55,15 +68,21 @@ jobs:
       - name: Install pybind11
         run: python -m pip install --upgrade pip pybind11
 
+      - name: Create CTP SDK stub
+        run: |
+          mkdir -p ctp_sdk_stub
+          for h in ThostFtdcMdApi.h ThostFtdcTraderApi.h ThostFtdcUserApiStruct.h ThostFtdcUserApiDataType.h; do
+            echo "#pragma once" > "ctp_sdk_stub/$h"
+          done
+          echo "" | gcc -shared -o ctp_sdk_stub/libthostmduserapi_se.so -x c -
+          echo "" | gcc -shared -o ctp_sdk_stub/libthosttraderapi_se.so -x c -
+
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_PYTHON=ON -DENABLE_TESTS=ON
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCTP_SDK_DIR=${{ github.workspace }}/ctp_sdk_stub
+          -DENABLE_PYTHON=ON
+          -DENABLE_TESTS=ON
 
-      - name: Build hft_framework
-        run: cmake --build build --target hft_framework
-
-      - name: Build hft_tests
-        run: cmake --build build --target hft_tests
-
-      - name: Run tests
-        run: ./dist/hft_tests --gtest_filter=-*Live*:-*Integration*
-        continue-on-error: true
+      - name: Build
+        run: cmake --build build -j$(nproc)

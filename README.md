@@ -32,6 +32,33 @@ are great choices. This project complements them by providing a
 lightweight, benchmark-driven execution layer for latency-sensitive
 experiments.
 
+### Architecture
+
+```
+                        ┌─────────────────────────────────────────────┐
+                        │              Consumer Thread                │
+                        │  ┌─────────┐ ┌──────┐ ┌────────┐ ┌──────┐ │
+  ┌──────────┐  SPSC    │  │ Risk    │ │Order │ │Position│ │Cond  │ │
+  │CTP/QDP   │─────────►│  │ Manager │ │Mgr   │ │Manager │ │Orders│ │
+  │MD Gateway│  Queue    │  └────┬────┘ └──┬───┘ └────────┘ └──────┘ │
+  └──────────┘ (lock-   │       │         │                          │
+               free)    │  ┌────▼─────────▼───┐    ┌──────────────┐  │
+  ┌──────────┐  SPSC    │  │  Trading Engine   │───►│  Strategies  │  │
+  │CTP/QDP   │─────────►│  │  (event loop)     │    │ C++ / Python │  │
+  │TD Gateway│  Queue    │  └──────────────────┘    └──────────────┘  │
+  └──────────┘          └──────────┬──────────────────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+              ┌──────────┐ ┌────────────┐ ┌────────────┐
+              │Async Log │ │Tick Record │ │ WebUI/API  │
+              │(SPSC)    │ │(WAL)       │ │ (HTTP)     │
+              └──────────┘ └────────────┘ └────────────┘
+```
+
+> One consumer thread owns all engine state. Gateway threads only decode
+> and enqueue via lock-free SPSC queues. Strategies never need locks.
+
 ### Key features
 
 | Category | Details |
@@ -110,12 +137,6 @@ Full guide: **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
 | [docs/SECURITY.md](docs/SECURITY.md) | Credential encryption (DPAPI / AES-GCM) |
 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | Reproducible latency numbers |
 
-### Architecture (TL;DR)
-
-One consumer thread owns all engine state. Gateway threads only decode
-and enqueue via lock-free SPSC queues. Strategies run on the consumer
-thread — no locks needed. See **[docs/OVERVIEW.md](docs/OVERVIEW.md)** and **[docs/DESIGN.md](docs/DESIGN.md)**.
-
 ### CTP SDK
 
 The CTP C++ SDK is **not bundled**. Download it from
@@ -149,6 +170,32 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 [WonderTrader](https://github.com/wondertrader/wondertrader)
 等成熟项目。本项目可以作为它们的补充，提供一个轻量、可测量的
 低延迟执行层，用于延迟敏感的实验和学习。
+
+### 架构概览
+
+```
+                        ┌─────────────────────────────────────────────┐
+                        │              消费者线程 (唯一状态持有者)       │
+                        │  ┌─────────┐ ┌──────┐ ┌────────┐ ┌──────┐ │
+  ┌──────────┐  SPSC    │  │ 风控    │ │订单  │ │ 持仓   │ │条件单│ │
+  │CTP/QDP   │─────────►│  │ 管理器  │ │管理器│ │ 管理器 │ │管理器│ │
+  │行情网关  │  队列     │  └────┬────┘ └──┬───┘ └────────┘ └──────┘ │
+  └──────────┘ (无锁)   │       │         │                          │
+                        │  ┌────▼─────────▼───┐    ┌──────────────┐  │
+  ┌──────────┐  SPSC    │  │  交易引擎         │───►│  策略        │  │
+  │CTP/QDP   │─────────►│  │  (事件循环)       │    │ C++ / Python │  │
+  │交易网关  │  队列     │  └──────────────────┘    └──────────────┘  │
+  └──────────┘          └──────────┬──────────────────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+              ┌──────────┐ ┌────────────┐ ┌────────────┐
+              │异步日志  │ │Tick 录制   │ │ WebUI/API  │
+              │(SPSC)    │ │(WAL)       │ │ (HTTP)     │
+              └──────────┘ └────────────┘ └────────────┘
+```
+
+> 单消费者线程持有全部引擎状态，网关线程只解码 + SPSC 入队，策略不需要任何锁。
 
 ### 主要功能
 
@@ -225,11 +272,10 @@ cd dist && ./hft_framework --config config.ini
 | [docs/SECURITY.md](docs/SECURITY.md) | 凭据加密（DPAPI / AES-GCM） |
 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | 可复现的延迟数据 |
 
-### 架构
+### 设计文档
 
-一句话：单消费者线程持有全部引擎状态，网关线程只解码 + SPSC 入队，
-策略跑在消费者线程上，**不需要任何锁**。
-详见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**。
+详细的工程设计决策（每个模块做了什么、为什么、放弃了什么）见
+**[docs/DESIGN.md](docs/DESIGN.md)**。
 
 ### CTP SDK
 

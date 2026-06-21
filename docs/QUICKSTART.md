@@ -20,7 +20,7 @@
 ### 第 1 步：克隆
 
 ```powershell
-git clone https://github.com/<you>/hft_framework.git
+git clone https://github.com/Essential1220/hft_framework.git
 cd hft_framework
 ```
 
@@ -107,18 +107,28 @@ MarketFront = tcp://182.254.243.31:40011
 dist\hft_framework.exe --interactive --config dist\config.ini
 ```
 
-启动成功后(节选)：
+启动成功后你会看到类似输出：
 
 ```
-[INFO] Logger initialized
-[INFO] 行情网关初始化开始: section=CTP.123456 front=tcp://...
-[INFO] 行情网关登录成功
-[INFO] 交易网关启动开始: account_count=1
-[INFO] 交易网关 123456 登录成功
-[INFO] Engine started, awaiting commands. Type 'help' for usage.
+[2026-06-20 14:30:01.123] [INFO] Logger initialized (queue=8192)
+[2026-06-20 14:30:01.125] [INFO] ConfigStore: loaded 1 account(s)
+[2026-06-20 14:30:01.130] [INFO] WebServer listening on port 9090
+[2026-06-20 14:30:01.132] [INFO] 行情网关初始化: CTP.123456 -> tcp://182.254.243.31:40011
+[2026-06-20 14:30:01.224] [INFO] 行情TCP连接成功 (92ms)
+[2026-06-20 14:30:01.254] [INFO] 行情CTP登录成功 (30ms)
+[2026-06-20 14:30:01.438] [INFO] 交易TCP连接成功 (184ms)
+[2026-06-20 14:30:01.526] [INFO] 交易AppAuth认证成功 (88ms)
+[2026-06-20 14:30:01.842] [INFO] 交易登录+结算确认成功 (316ms)
+[2026-06-20 14:30:04.078] [INFO] 持仓快照同步完成 (2236ms)
+[2026-06-20 14:30:04.079] [INFO] ✓ 账户就绪: 123456 (balance=100000.00, available=100000.00)
+[2026-06-20 14:30:04.080] [INFO] Strategy loaded: demo_main (python, instruments=rb2610)
+[2026-06-20 14:30:04.081] [INFO] Engine started. Type 'help' for commands, 'q' to quit.
+[2026-06-20 14:30:04.500] [INFO] 首个tick到达: rb2610 last=3256.0 vol=12345
 >
 ```
 
+看到 `✓ 账户就绪` 和 `首个tick到达` 就说明一切正常了。
+打开浏览器访问 `http://localhost:9090/` 可以看到 WebUI 仪表盘。
 输入 `q` 或 `quit` 优雅关闭。
 
 ### 第 7 步：挂一个策略
@@ -133,7 +143,7 @@ List = demo_main
 Type        = python
 ScriptPath  = strategies/example_strategy.py
 AccountID   = 123456
-Instruments = IF2406            ; <-- 选一个能交易的合约
+Instruments = rb2610            ; <-- 选一个当前活跃合约
 OrderSize   = 1
 ```
 
