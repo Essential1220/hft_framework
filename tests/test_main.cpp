@@ -237,6 +237,15 @@ void test_network_receiver_factory();
 void test_udp_publish_receive_roundtrip();
 void test_udp_header_format();
 
+// Backtest
+void test_tick_reader_roundtrip();
+void test_tick_reader_bad_header();
+void test_tick_reader_empty_file();
+void test_merge_ticks_by_time();
+void test_backtest_report_compute();
+void test_backtest_report_empty();
+void test_backtest_context_fill();
+
 // ConfigValidator
 void test_config_valid_passes();
 void test_config_missing_account_section();
@@ -435,6 +444,16 @@ int main() {
     TEST_SUITE("UdpGateway");
     RUN_TEST(test_udp_publish_receive_roundtrip);
     RUN_TEST(test_udp_header_format);
+
+    // ---- Backtest ----
+    TEST_SUITE("Backtest");
+    RUN_TEST(test_tick_reader_roundtrip);
+    RUN_TEST(test_tick_reader_bad_header);
+    RUN_TEST(test_tick_reader_empty_file);
+    RUN_TEST(test_merge_ticks_by_time);
+    RUN_TEST(test_backtest_report_compute);
+    RUN_TEST(test_backtest_report_empty);
+    RUN_TEST(test_backtest_context_fill);
 
     // ---- ConfigValidator ----
     TEST_SUITE("ConfigValidator");

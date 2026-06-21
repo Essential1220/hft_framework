@@ -1,4 +1,5 @@
 #include "app/app_runtime.h"
+#include "engine/backtest_engine.h"
 #include "common/config.h"
 #include "common/huge_page.h"
 #include "common/logger.h"
@@ -338,6 +339,37 @@ int main(int argc, char** argv) {
 
     if (hft::enable_lock_memory_privilege()) {
         LOG_INFO("SeLockMemoryPrivilege enabled — large pages available");
+    }
+
+    // --backtest mode: run backtest and exit
+    {
+        bool is_backtest = false;
+        BacktestConfig bt_config;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--backtest") {
+                is_backtest = true;
+            } else if (arg.rfind("--tick-file=", 0) == 0) {
+                bt_config.tick_files.push_back(arg.substr(12));
+            } else if (arg == "--tick-file" && i + 1 < argc) {
+                bt_config.tick_files.push_back(argv[++i]);
+            } else if (arg.rfind("--instrument=", 0) == 0) {
+                bt_config.instrument = arg.substr(13);
+            } else if (arg == "--instrument" && i + 1 < argc) {
+                bt_config.instrument = argv[++i];
+            } else if (arg.rfind("--strategy=", 0) == 0) {
+                bt_config.strategy_type = arg.substr(11);
+            } else if (arg.rfind("--order-size=", 0) == 0) {
+                bt_config.order_size = std::max(1, std::stoi(arg.substr(13)));
+            }
+        }
+        if (is_backtest) {
+            if (bt_config.strategy_type.empty()) bt_config.strategy_type = "simple";
+            BacktestEngine backtest;
+            bool ok = backtest.run(bt_config);
+            Logger::instance().shutdown();
+            return ok ? 0 : 1;
+        }
     }
 
     AppRuntime runtime;
