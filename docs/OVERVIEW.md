@@ -67,7 +67,7 @@
 │  │                                                          │      │
 │  │  OrderManager          订单状态机 + 成交去重 + enrich      │      │
 │  │  PositionManager       持仓管理 (含今仓/昨仓拆分)          │      │
-│  │  RiskManager           7 维风控 + RMS 5 级递进            │      │
+│  │  RiskManager           10 维风控 + RMS 5 级递进            │      │
 │  │  ConditionalOrderMgr   止损/止盈/追踪止损/OCO +           │      │
 │  │                        TriggerBounds O(1) 预过滤          │      │
 │  │  AlgoOrderMgr          TWAP / Iceberg 算法单              │      │
@@ -127,7 +127,7 @@ CTP SDK 回调线程 ──► CtpMdGateway::OnRtnDepthMarketData()
   │                   acquire GIL → batch dispatch → release GIL
   │
   ├─ 4. 策略内部调用 send_order(req):
-  │      ├─ RiskManager::check_order() ← 7 维瀑布流检查
+  │      ├─ RiskManager::check_order() ← 10 维瀑布流检查
   │      │    拒绝 → on_order(status=Rejected, status_msg=原因)
   │      │    通过 → OrderManager 创建订单
   │      └─ CtpTradeGateway 发出 → CTP OnRtnOrder 回调
@@ -155,10 +155,16 @@ CTP SDK 回调线程 ──► CtpMdGateway::OnRtnDepthMarketData()
 | **OrderManager** | `order/order_manager.*` | 订单状态机、成交去重、enrich | 消费线程 |
 | **ConditionalOrderMgr** | `order/conditional_order_manager.*` | 条件单触发、TriggerBounds、OCO | 消费线程 |
 | **AlgoOrderMgr** | `order/algo_order_manager.*` | TWAP/冰山算法单 | 消费线程 |
-| **RiskManager** | `risk/risk_manager.*` | 7 维风控、RMS 模式递进 | 消费线程 |
+| **RiskManager** | `risk/risk_manager.*` | 10 维风控、RMS 模式递进 | 消费线程 |
 | **PositionManager** | `position/position_manager.*` | 多账户持仓、今仓/昨仓拆分 | 消费线程 |
+| **CloseManager** | `order/close_manager.*` | 平仓状态机、重试、平今转平昨降级 | 消费线程 |
 | **StrategyManager** | `strategy/strategy_manager.*` | 策略生命周期、热加载、Python 桥接 | 消费线程 |
-| **Crypto** | `common/crypto.*` | DPAPI/AES-GCM 凭据加密 | 启动时 |
+| **SessionManager** | `engine/session_manager.*` | 交易时段门控、行情超时监控 | 消费线程 |
+| **TickDataManager** | `engine/tick_data_manager.h` | 行情缓存，shared_mutex 读写分离 | 消费+Web 线程 |
+| **InstrumentRegistry** | `engine/instrument_registry.h` | 合约注册表、热合约 copy-on-write 快照 | 消费线程 |
+| **KlineManager** | `engine/kline_manager.h` | K 线聚合(1m/5m/15m/1d) | 消费线程 |
+| **FeaturePipeline** | `market/feature_pipeline.h` | 技术指标(SMA/EMA/RSI/ATR/VWAP) | 消费线程 |
+| **Crypto** | `common/crypto.*` | DPAPI (Win) / XOR-Base64 (Linux) 凭据加密 | 启动时 |
 
 ---
 
@@ -169,7 +175,7 @@ CTP SDK 回调线程 ──► CtpMdGateway::OnRtnDepthMarketData()
 | 场景 | p50 | p99 | p99.9 | 说明 |
 |------|-----|-----|-------|------|
 | Tick→策略 端到端 | 0.30 μs | **0.70 μs** | 34.30 μs | 含 SPSC pop + 条件单检查 + 策略派发 |
-| 发单 端到端 | 0.30 μs | **1.10 μs** | 9.90 μs | 含 7 维风控 + 订单创建 |
+| 发单 端到端 | 0.30 μs | **1.10 μs** | 9.90 μs | 含 10 维风控 + 订单创建 |
 | 条件单检查 | 0.10 μs | 0.10 μs | 0.60 μs | 含 TriggerBounds 预过滤 |
 | 订单回报处理 | 0.10 μs | 0.10 μs | 0.20 μs | 含 enrich + 去重 |
 | 持仓更新 | 0.10 μs | 0.10 μs | 0.10 μs | 纯内存操作 |
@@ -184,8 +190,8 @@ CTP SDK 回调线程 ──► CtpMdGateway::OnRtnDepthMarketData()
 | 指标 | 数值 |
 |------|------|
 | 语言 | C++17 |
-| 源文件 | 73 |
+| 源文件 | 97 |
 | 总代码行数 | ~89,600 |
-| 测试用例 | 89 (全通过) |
+| 测试用例 | 117 (全通过) |
 | 柜台 | CTP + QDP (可选) |
 | 平台 | Windows (MSVC) + Linux (GCC) |

@@ -6,6 +6,35 @@
 hft_bench --output docs/BENCHMARK.md --runs 5 --warmup 1
 ```
 
+### CLI 参数
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `--output <path>` | path | stdout | 输出文件路径，不指定则打印到终端 |
+| `--format <fmt>` | enum | `md` | 输出格式：`md`(Markdown 表格)、`csv`(逗号分隔)、`json`(机器可读) |
+| `--runs <N>` | int | 3 | 每个场景重复轮数，取 p99 最小的一轮作为最终结果(屏蔽偶发抖动) |
+| `--warmup <N>` | int | 1 | 预热轮数(丢弃结果)，让 CPU 缓存和分支预测器稳定 |
+| `--samples <N>` | int | 10000 | 延迟场景每轮采样数(吞吐场景固定 1,000,000) |
+| `--filter <regex>` | regex | 全跑 | 只跑名字匹配该正则的场景(如 `--filter order_manager`) |
+| `--list` | flag | — | 列出所有已注册场景名后退出 |
+| `--help` | flag | — | 显示帮助信息 |
+
+**示例：**
+
+```bash
+# 只跑发单和条件单相关场景，输出 JSON 到文件
+hft_bench --filter "send_order|cond_order" --format json --output bench_result.json
+
+# 高精度模式：10 轮 × 50000 样本
+hft_bench --runs 10 --warmup 3 --samples 50000 --output docs/BENCHMARK.md
+
+# 列出可用场景
+hft_bench --list
+```
+
+**结果选择策略：** 多轮运行后选择 p99 最小的一轮(延迟场景)或 ops/sec 最大的一轮
+(吞吐场景)作为最终结果，避免操作系统调度抖动影响报告。
+
 ---
 
 ## 1. 微基准测试 (hft_bench)

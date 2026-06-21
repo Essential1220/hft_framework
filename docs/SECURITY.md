@@ -16,8 +16,8 @@ Password = ENC:<base64 密文>
 
 | 平台 | 算法 | 密钥存储位置 |
 |---|---|---|
-| Windows | AES-256-GCM | DPAPI(绑定当前 Windows 登录会话 + 硬件) |
-| Linux | AES-256-GCM | `~/.hft_framework_key`(权限 0600) |
+| Windows | DPAPI (`CryptProtectData`) | 绑定当前 Windows 登录会话 + 硬件，无需独立密钥文件 |
+| Linux | XOR 混淆 + Base64 | `~/.hft_framework_key`(权限 0600)。**仅限开发/测试环境；生产部署应替换为 AES-256-GCM** |
 
 Windows 上，密钥与当前 Windows 登录会话绑定。把 `config.ini` 复制到
 另一台机器或另一个用户账户，**解密会失败** —— 必须在那里重新输入明文。
@@ -31,7 +31,7 @@ Linux 上，密钥文件 `~/.hft_framework_key` 自动创建且 `chmod 600`。
 |---|---|
 | `config.ini`(含真实凭据) | 里的 `ENC:...` 密文只有在原机器上才能解密。**绝不**提交到 Git |
 | `dist/config.ini.bak` | 首次运行时自动生成的加密前备份。同 `config.ini` |
-| `~/.hft_framework_key`(Linux) | AES-GCM 密钥本体。**绝不**分享或提交 |
+| `~/.hft_framework_key`(Linux) | XOR 混淆密钥文件。**绝不**分享或提交 |
 | `dist/hft_data.db` | SQLite 数据库，含迁移后的配置(含加密值)。不在 Git 中(已 gitignore) |
 | `[Web] AuthToken` | 内部状态 HTTP 服务的令牌(若启用)。**绝不**提交 |
 

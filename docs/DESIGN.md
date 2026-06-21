@@ -14,7 +14,7 @@
 6. [消费者主循环](#6-消费者主循环)
 7. [订单管理：去重 + 终态保护 + enrich](#7-订单管理去重--终态保护--enrich)
 8. [条件单管理器：TriggerBounds + 3 阶段检查](#8-条件单管理器triggerbounds--3-阶段检查)
-9. [风控管理器：7 维检查 + RMS 递进](#9-风控管理器7-维检查--rms-递进)
+9. [风控管理器：10 维检查 + RMS 递进](#9-风控管理器10-维检查--rms-递进)
 10. [持仓管理器](#10-持仓管理器)
 11. [策略热加载 + pybind11](#11-策略热加载--pybind11)
 12. [凭据加密存储](#12-凭据加密存储)
@@ -23,6 +23,9 @@
 15. [双活网关热切换](#15-双活网关热切换)
 16. [UDP 组播与共享内存 IPC](#16-udp-组播与共享内存-ipc)
 17. [看门狗进程](#17-看门狗进程)
+18. [算法单引擎 (TWAP / 冰山)](#18-算法单引擎-twap--冰山)
+19. [平仓引擎 (CloseManager)](#19-平仓引擎-closemanager)
+20. [技术指标管道 (Feature Pipeline)](#20-技术指标管道-feature-pipeline)
 
 ---
 
@@ -458,7 +461,7 @@ ConditionalCheckResult check_tick(const TickData& tick, callback) {
 
 ---
 
-## 9. 风控管理器：7 维检查 + RMS 递进
+## 9. 风控管理器：10 维检查 + RMS 递进
 
 **文件：** `src/risk/risk_manager.cpp`
 
@@ -469,16 +472,21 @@ ConditionalCheckResult check_tick(const TickData& tick, callback) {
 
 ### 检查顺序（瀑布流）
 
-| # | 检查项 | 成本 | 说明 |
-|---|--------|------|------|
-| 1 | volume > 0 | ~1 次比较 | 基本合法性 |
-| 2 | volume ≤ MaxOrderSize | ~1 次比较 | 胖手指检查 |
-| 3 | 在交易时段内 | ~1 次查表 | 非交易时段直接拒绝 |
-| 4 | 日内亏损 < MaxDailyLoss | 查 AccountInfo + PnL | 保护本金 |
-| 5 | 净持仓 ≤ MaxNetPosition（含挂单投影） | 查持仓 + 条件单待开仓量 | 控制风险敞口 |
-| 6 | 可平仓位 ≥ 平仓量 | 查持仓（今仓/昨仓分别验证） | 防止超卖废单 |
-| 7 | 报单频率 < MaxOrdersPerMinute | O(滑动窗口) | 防止流控熔断 |
-| 8 | 撤单率 < MaxCancelRate | O(滑动窗口) | 防止交易所警告或封号 |
+| # | 检查项 | 成本 | 豁免 | 说明 |
+|---|--------|------|------|------|
+| 1 | RMS 模式放行 | ~1 次比较 | — | 根据当前风控模式决定是否继续 |
+| 2 | volume > 0 | ~1 次比较 | — | 基本合法性 |
+| 3 | 价格合法性 | ~3 次比较 | — | 限价单在涨跌停范围内，偏离度不超阈值 |
+| 4 | volume ≤ MaxOrderSize | ~1 次比较 | ✓ | 胖手指检查 |
+| 5 | 在交易时段内 | ~1 次查表 | ✓ | 非交易时段直接拒绝 |
+| 6 | 日内亏损 < MaxDailyLoss | 查 AccountInfo + PnL | ✓ | 保护本金 |
+| 7 | 净持仓 ≤ MaxNetPosition（含挂单投影） | 查持仓 + 条件单待开仓量 | **不豁免** | 控制风险敞口 |
+| 8 | 可平仓位 ≥ 平仓量 | 查持仓（今仓/昨仓分别验证） | **不豁免** | 防止超卖废单 |
+| 9 | 报单频率 < MaxOrdersPerMinute | O(滑动窗口) | ✓ | 防止流控熔断 |
+| 10 | 撤单率 < MaxCancelRate | O(滑动窗口) | ✓ | 防止交易所警告或封号 |
+
+> **豁免列 ✓ = 当 `is_risk_reduction=true` 时跳过该检查。**
+> 净持仓和可平量检查**永远执行**——风控不能阻止系统自救，但也不能让系统超卖。
 
 ### is_risk_reduction 豁免机制
 
@@ -486,9 +494,10 @@ ConditionalCheckResult check_tick(const TickData& tick, callback) {
 
 ```
 场景：日内亏损已超过 5000 限额
-操作 A：BUY  OPEN  1 手 → 检查 1-8 全走 → 第 4 步被拒 ✓
+操作 A：BUY  OPEN  1 手 → 检查 1-10 全走 → 第 6 步被拒 ✓
 操作 B：SELL CLOSE 1 手 → is_risk_reduction=true
-       → 跳过检查 2/3/4/7/8 → 放行 ✓
+       → 跳过检查 4/5/6/9/10 → 放行 ✓
+       → 仍执行检查 7/8（净持仓 + 可平量永不跳过）
 ```
 
 ### RMS 模式递进
@@ -774,3 +783,97 @@ struct WatchdogShm {
 ```
 
 不用 socket/pipe——共享内存没有 I/O 开销，主进程只需一次原子 store。
+
+---
+
+## 18. 算法单引擎 (TWAP / 冰山)
+
+**文件：** `src/order/algo_order_manager.h`
+
+### 决策
+
+提供 TWAP（时间加权）和冰山（成交驱动）两种算法单，在消费线程上执行切片逻辑。
+
+### TWAP (Time-Weighted Average Price)
+
+将总量拆成 N 片，每隔固定时间发一片：
+
+```cpp
+interval_ms = (duration_seconds * 1000) / num_slices;
+// 每次 tick() 检查：elapsed >= interval_ms → send_next_slice()
+```
+
+驱动方式：消费线程定时任务（每秒 `tick()` 调用），不依赖行情。
+
+### 冰山 (Iceberg)
+
+将总量拆成 `display_volume` 大小的切片，前一片成交后立刻发下一片。
+
+驱动方式：`on_trade()` 回调触发下一片，响应速度取决于成交回报到达速度。
+
+### 放弃了什么
+
+- 没有做 VWAP（需要历史成交量分布数据，SimNow 不提供）。
+- 算法单不走独立线程——单消费线程足够，TWAP 精度要求不高（秒级）。
+
+---
+
+## 19. 平仓引擎 (CloseManager)
+
+**文件：** `src/order/close_manager.h`
+
+### 决策
+
+独立状态机管理平仓任务，自动处理重试、超时、平今转平昨降级。
+
+### 状态机
+
+```
+Pending → Sent → (超时 5s) → Cancelling → Pending (重试)
+                                         → Done (全部成交)
+                                         → Failed (重试 3 次耗尽)
+
+Sent → OrderRejected → 平今被拒 → 自动降级为平昨 → Pending
+```
+
+### 解决什么问题
+
+| 场景 | CloseManager 如何处理 |
+|---|---|
+| 平仓单被交易所拒绝 | 自动重试，最多 3 次 |
+| 平今合约不支持(如 SHFE) | 自动降级为 CloseYesterday 重发 |
+| 平仓单超时未成交 | 5 秒后自动撤单重发 |
+| 部分成交后超时 | 撤单后按剩余量重发 |
+| 3 次重试仍失败 | 标记 Failed，记录孤仓数量，发出告警 |
+
+### 放弃了什么
+
+不做市价平仓——用涨跌停价替代（`lower_limit` 平多 / `upper_limit` 平空），
+在限价市场里这是最快的成交方式。
+
+---
+
+## 20. 技术指标管道 (Feature Pipeline)
+
+**文件：** `src/market/feature_pipeline.h`
+
+### 决策
+
+内置 5 种常用技术指标（SMA / EMA / RSI / ATR / VWAP），在消费线程上随 tick 实时更新。
+
+### 设计
+
+每个合约独立维护历史窗口（默认 100 tick），指标按需计算：
+
+| 指标 | 算法 | 用途 |
+|---|---|---|
+| SMA | 滑动窗口均值 | 趋势判断基线 |
+| EMA | 指数加权均值 | 快速趋势跟踪 |
+| RSI | 涨跌幅比率 | 超买超卖判断 |
+| ATR | 真实波幅均值 | 止损幅度参考 |
+| VWAP | 成交量加权均价 | 算法单基准价 |
+
+### 放弃了什么
+
+- 不做 MACD / Bollinger Band 等组合指标——用户可以在 Python 策略里用 SMA/EMA 自行计算。
+- 不支持多周期（只有 tick 级别）——K 线级别指标通过 `query_klines()` 在策略侧计算。

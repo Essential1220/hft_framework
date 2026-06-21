@@ -13,8 +13,10 @@ Python 策略本质就是一个模块，实现以下任意子集即可：
 | `on_tick(tick)` | 每笔行情 | `dict` |
 | `on_order(order)` | 每条订单回报 | `dict` |
 | `on_trade(trade)` | 每笔成交回报 | `dict` |
+| `on_bar(instrument, period, bar)` | K 线闭合时(1m/5m/15m/1d) | `str`, `str`, `dict` |
+| `on_timer(timer_id)` | 定时器触发时(由 `register_timer()` 注册) | `int` |
 | `on_reconnect()` | 交易网关重连成功后，首个新 tick 前 | 无 |
-| `on_destroy()` | 卸载策略前(热加载或停机) | 无 |
+| `on_stop()` | 卸载策略前(热加载或停机) | 无 |
 
 所有回调都跑在**消费者线程**上，**不需要任何锁**保护策略状态。
 绝对**不要**在回调里做阻塞 I/O(`time.sleep`、`requests.get` 等)，
@@ -97,11 +99,19 @@ Python 策略本质就是一个模块，实现以下任意子集即可：
 | `cancel_conditional_order(cond_order_id: int)` | `bool` | 撤排队中的条件单 |
 | `allocate_group_id()` | `int` | 申请 OCO 互斥分组编号(一个触发自动撤其他) |
 | `get_net_position(instrument: str)` | `int` | 净仓(多正空负) |
-| `get_position(instrument: str, direction: str)` | `dict` | 单方向持仓：`volume`、`avg_price`、`today_volume`、`yesterday_volume` |
-| `get_strategy_context()` | `dict` | 策略启动上下文：`params`、`instruments`、`account_id`、`order_size` |
-| `get_param_int(name, default)` | `int` | 读 `[Strategy.<id>]` 参数为 int |
-| `get_param_double(name, default)` | `float` | 同上，float |
-| `get_param_string(name, default)` | `str` | 同上，string |
+| `get_position(instrument: str, direction: str)` | `dict` | 单方向持仓：`total, today, yesterday, avg_price` |
+| `get_account_info(account_id: str = "")` | `dict` | 账户资金：`balance, available, margin, position_profit` 等 |
+| `get_order_book(instrument: str)` | `dict` | 盘口快照：`mid_price, spread, imbalance, bids[], asks[]` |
+| `get_strategy_context()` | `dict` | 策略启动上下文：`params, instruments, account_id, order_size` |
+| `query_klines(instrument, period, count=200)` | `list[dict]` | K 线数据：`open, high, low, close, volume, timestamp_ms` |
+| `get_param(name, default="")` | `str` | 读 `[Strategy.<id>]` 自定义参数 |
+| `get_param_int(name, default=0)` | `int` | 同上，int 类型 |
+| `get_param_double(name, default=0.0)` | `float` | 同上，float 类型 |
+| `register_timer(interval_ms: int)` | `int`(timer_id) | 注册定时器，触发 `on_timer(timer_id)` |
+| `unregister_timer(timer_id: int)` | `void` | 取消定时器 |
+| `log_info(msg)` / `log_warn(msg)` / `log_error(msg)` | `void` | 输出日志到引擎日志系统 |
+| `save_state(state: dict)` | `void` | 持久化策略状态(key-value 字符串 dict) |
+| `load_state()` | `dict` | 恢复上次 `save_state()` 保存的状态 |
 
 ### 条件单类型
 
@@ -145,10 +155,25 @@ hft_engine.add_conditional_order({
 
 ### 热加载
 
-engine 运行时保存 `.py` 文件会自动触发热加载。
-生命周期顺序：旧实例 `on_destroy()`，再新实例 `on_init()`。
-**模块级变量**(`tick_count`、`position`、`cond_order_ids` 等)会丢失，
-请在 `on_init()` 里用 `hft_engine.get_net_position()` 重新同步。
+通过管理 API 或配置界面手动触发热加载（**不是**自动文件监听）。
+生命周期顺序：旧实例 `on_stop()`，再新实例 `on_init()`。
+
+**模块级变量**(`tick_count`、`position`、`cond_order_ids` 等)会丢失。
+如需跨热重载保留状态，使用 `save_state()` / `load_state()`：
+
+```python
+def on_stop():
+    hft_engine.save_state({"position": str(position), "trade_count": str(trade_count)})
+
+def on_init():
+    state = hft_engine.load_state()
+    global position, trade_count
+    position = int(state.get("position", "0"))
+    trade_count = int(state.get("trade_count", "0"))
+```
+
+对于不需要精确保留的状态（如持仓），也可在 `on_init()` 里用
+`hft_engine.get_net_position()` 从引擎重新同步。
 
 ### 示例策略
 
@@ -157,6 +182,7 @@ engine 运行时保存 `.py` 文件会自动触发热加载。
 | `strategies/example_strategy.py` | 条件单验证(止损 / 止盈 / 追踪) |
 | `strategies/ma_cross_strategy.py` | 均线穿越(用 `hft_sdk` 辅助函数) |
 | `strategies/instant_trigger_strategy.py` | 极简：首个 tick 触发一笔单 |
+| `strategies/latency_test_strategy.py` | 端到端延迟测量(tick→下单→撤单)，输出 CSV 报告 |
 | `strategies/hft_sdk.py` | 可复用辅助函数(**不注入**，策略里 `import hft_sdk`) |
 
 ### 策略开发注意事项

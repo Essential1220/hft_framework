@@ -127,6 +127,55 @@ MdBatchSize = 512
 
 ### `[Web]`
 
-> **内部功能，不建议对外暴露。** 若存在，会在 `127.0.0.1:<Port>` 启
+> **内部功能，不建议对外暴露。** 若存在，会在 `<Host>:<Port>` 启
 > 一个状态查询 HTTP 端点；`AuthToken` 必须保密，
-> **千万不要**把这个端口暴露到 localhost 之外。
+> **千万不要**把这个端口暴露到公网。
+
+| Key | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `Port` | int | `9090` | HTTP 监听端口 |
+| `Host` | string | `0.0.0.0` | 监听地址。生产环境建议改为 `127.0.0.1` |
+| `AuthToken` | string | `""` | Bearer token 鉴权。非空时每个请求需带 `Authorization: Bearer <token>` |
+| `EnableControl` | bool | `0` | 启用 POST 操作端点(撤单 / 切换 RMS 模式)。**0 = 只读** |
+| `AllowedOrigins` | string | `*` | CORS 允许来源。生产环境建议改为具体域名 |
+| `AllowInsecureNoAuth` | bool | `0` | 允许无 token 访问(仅本地调试用) |
+| `AutoOpenBrowser` | bool | `0` | 启动时自动打开浏览器访问 WebUI |
+
+### `[Watchdog]`
+
+独立看门狗进程通过共享内存监控引擎心跳。
+看门狗是独立二进制(`hft_watchdog`)，不在引擎进程内。
+
+| Key | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `Enable` | bool | `0` | 引擎侧：是否创建共享内存并写入心跳 |
+| `ShmName` | string | `hft_watchdog` | 共享内存名称(引擎和 watchdog 须一致) |
+| `StaleThresholdMs` | int | `3000` | 心跳超时阈值(毫秒)。watchdog 连续 3 次超时则报 CRITICAL |
+
+看门狗 CLI：
+```bash
+hft_watchdog --shm-name hft_watchdog --threshold 3000 --poll-interval 500
+```
+
+### `[Features]`
+
+内置技术指标管道。按合约独立维护滑动窗口。
+
+| Key | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `Enable` | bool | `0` | 启用 Feature Pipeline(SMA/EMA/RSI/ATR/VWAP) |
+| `HistorySize` | int | `100` | 每合约保留的 tick 历史窗口大小 |
+| `SmaPeriod` | int | `20` | 简单移动平均周期 |
+| `EmaPeriod` | int | `12` | 指数移动平均周期 |
+| `RsiPeriod` | int | `14` | RSI 指标周期 |
+| `AtrPeriod` | int | `14` | ATR 真实波幅周期 |
+
+### `[UDP]`
+
+UDP 组播行情分发。用于同一网段内多进程共享行情。
+
+| Key | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `MulticastGroup` | string | `239.1.1.1` | 组播 IP 地址 |
+| `Port` | int | `5555` | 组播端口 |
+| `PublishEnabled` | bool | `0` | 引擎侧：是否将收到的 tick 通过 UDP 组播转发 |

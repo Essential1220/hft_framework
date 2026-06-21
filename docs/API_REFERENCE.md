@@ -36,6 +36,8 @@
 | `void on_trade(const TradeInfo& trade)` | 每收到一笔成交回报 | **必须实现。** |
 | `void on_reconnect()` | 交易网关重连成功后 | 可选。用于重新同步状态 |
 | `void on_stop()` | 策略被卸载前 | 可选。清理资源 |
+| `void on_bar(const char* instrument, const char* period, const KlineBar& bar)` | K 线闭合时 | 可选。period: "1m","5m","15m","1d" |
+| `void on_timer(int timer_id)` | 定时器触发时 | 可选。由 `register_timer()` 注册 |
 
 #### 元数据/路由
 
@@ -106,26 +108,25 @@ int get_net_position(const char* instrument, const char* account_id);
 
 ```cpp
 struct TickData {
-    std::string instrument_id;   // 合约代码，如 "IF2406"
-    std::string exchange_id;      // 交易所，如 "CFFEX"
+    char instrument_id[24];       // 合约代码，如 "rb2610"
+    char exchange_id[8];          // 交易所，如 "SHFE"
     double last_price;            // 最新价
     double pre_close_price;       // 昨收
     double open_price;            // 开盘价
     double highest_price;         // 最高价
     double lowest_price;          // 最低价
-    double volume;                // 成交量
+    int volume;                   // 成交量
     double turnover;              // 成交额
     double open_interest;         // 持仓量
-    double bid_price[5];          // 买一 ~ 买五
-    double bid_volume[5];         // 买一量 ~ 买五量
-    double ask_price[5];          // 卖一 ~ 卖五
-    double ask_volume[5];         // 卖一量 ~ 卖五量
+    PriceLevel bid[5];            // 买一 ~ 买五 (price + volume)
+    PriceLevel ask[5];            // 卖一 ~ 卖五 (price + volume)
     double upper_limit;           // 涨停价
     double lower_limit;           // 跌停价
-    std::string update_time;      // 更新时间 "HH:MM:SS"
+    char update_time[12];         // 更新时间 "HH:MM:SS"
     int update_millisec;          // 毫秒
-    std::string trading_day;      // 交易日
-    std::string action_day;       // 业务日期
+    char trading_day[12];         // 交易日
+    char action_day[12];          // 业务日期
+    int64_t local_recv_ns;        // 本地接收纳秒时间戳 (steady_clock)
 };
 ```
 
@@ -133,13 +134,13 @@ struct TickData {
 
 ```cpp
 struct OrderRequest {
-    std::string instrument_id;    // 合约代码
+    char instrument_id[24];       // 合约代码
     Direction direction;           // Direction::Buy 或 Direction::Sell
-    OffsetFlag offset;            // OffsetFlag::Open / Close / CloseToday / CloseYesterday
+    Offset offset;                // Offset::Open / Close / CloseToday / CloseYesterday
     double price;                  // 限价
     int volume;                    // 手数
-    std::string strategy_id;      // 策略 ID（引擎自动填充）
-    std::string account_id;       // 资金账号（引擎按策略配置自动填充）
+    char strategy_id[32];         // 策略 ID（引擎自动填充）
+    char account_id[16];          // 资金账号（引擎按策略配置自动填充）
 };
 ```
 
@@ -147,19 +148,21 @@ struct OrderRequest {
 
 ```cpp
 struct OrderInfo {
-    std::string order_ref;        // 本地报单引用号
-    std::string order_sys_id;     // 交易所系统编号
-    std::string instrument_id;    // 合约代码
-    std::string exchange_id;      // 交易所
+    char order_ref[16];           // 本地报单引用号
+    char order_sys_id[24];        // 交易所系统编号
+    char instrument_id[24];       // 合约代码
+    char exchange_id[8];          // 交易所
     Direction direction;           // 买卖方向
-    OffsetFlag offset;            // 开平
+    Offset offset;                // 开平
     double price;                  // 委托价格
     int total_volume;              // 总数量
     int traded_volume;             // 已成交数量
     OrderStatus status;            // 订单状态
-    std::string status_msg;       // 状态消息（风控拒绝原因等）
+    char status_msg[80];          // 状态消息（风控拒绝原因等）
     int front_id;                  // 前置 ID
     int session_id;                // 会话 ID
+    char strategy_id[32];         // 策略 ID
+    char account_id[16];          // 资金账号
 };
 ```
 
@@ -167,14 +170,17 @@ struct OrderInfo {
 
 ```cpp
 struct TradeInfo {
-    std::string instrument_id;    // 合约代码
+    char instrument_id[24];       // 合约代码
+    char exchange_id[8];          // 交易所
     Direction direction;           // 买卖方向
-    OffsetFlag offset;            // 开平
+    Offset offset;                // 开平
     double price;                  // 成交价
     int volume;                    // 成交数量
-    std::string trade_id;         // 成交编号
-    std::string order_ref;        // 对应报单引用号
-    std::string trade_time;       // 成交时间
+    char trade_id[24];            // 成交编号
+    char order_ref[16];           // 对应报单引用号
+    char trade_time[12];          // 成交时间
+    char strategy_id[32];         // 策略 ID
+    char account_id[16];          // 资金账号
 };
 ```
 
@@ -200,22 +206,29 @@ struct ConditionalOrder {
 enum class Direction { Buy, Sell };
 enum class OffsetFlag { Open, Close, CloseToday, CloseYesterday };
 enum class OrderStatus {
-    PendingSubmit = 0,   // 待报（已发往交易所，等待确认）
-    PartiallyFilled = 1, // 部成（部分成交）
-    Filled = 2,          // 全成（全部成交）
-    Canceled = 3,        // 已撤
-    Rejected = 4,        // 错误（被风控拦截或交易所拒绝）
+    Created = -1,        // 已创建（尚未发送）
+    Pending = 0,         // 待报/已报
+    PartTraded = 1,      // 部成（部分成交）
+    AllTraded = 2,       // 全成（全部成交）
+    Cancelled = 3,       // 已撤
+    Error = 4,           // 错误（被风控拦截或交易所拒绝）
+    RiskRejected = 5,    // 风控拒绝
+    CancelPending = 6,   // 撤单中
+    Submitted = 7,       // 已提交
 };
-enum class RiskMode { Normal, NoOpen, ReduceOnly, Liquidating, Halted };
+enum class RiskMode { Normal, Warning, NoOpen, ReduceOnly, Liquidating, Halted };
 ```
 
 #### PositionInfo
 
 ```cpp
 struct PositionInfo {
-    int volume;                    // 持仓量
-    int today_volume;              // 今仓量
-    int yesterday_volume;          // 昨仓量
+    char instrument_id[24];       // 合约代码
+    Direction direction;           // 持仓方向
+    char account_id[16];          // 资金账号
+    int total;                     // 总持仓量
+    int today;                     // 今仓量
+    int yesterday;                 // 昨仓量
     double avg_price;              // 开仓均价
 };
 ```
@@ -333,7 +346,56 @@ ctx = hft_engine.get_strategy_context()
 # 读取配置参数（类型安全，带默认值）
 value_int    = hft_engine.get_param_int("OrderSize", 1)
 value_float  = hft_engine.get_param_double("Threshold", 0.01)
-value_str    = hft_engine.get_param_string("Mode", "default")
+value_str    = hft_engine.get_param("Mode", "default")
+```
+
+#### K 线查询
+
+```python
+bars = hft_engine.query_klines("rb2610", "1m", 200)
+# bars = [{"open": 3850, "high": 3855, "low": 3848, "close": 3852,
+#          "volume": 1234, "turnover": 47520, "timestamp_ms": 1719000000000, "time": "21:30"}, ...]
+```
+
+#### 盘口快照
+
+```python
+book = hft_engine.get_order_book("rb2610")
+# book = {"instrument_id": "rb2610", "mid_price": 3850.2, "spread": 1.0,
+#         "imbalance": 0.15, "bids": [...], "asks": [...]}
+```
+
+#### 账户资金
+
+```python
+account = hft_engine.get_account_info()  # account_id 可选
+# account = {"account_id": "210037", "balance": 100000.0, "available": 85000.0,
+#            "margin": 12000.0, "position_profit": 3500.0, ...}
+```
+
+#### 定时器
+
+```python
+timer_id = hft_engine.register_timer(5000)   # 每 5 秒触发 on_timer(timer_id)
+hft_engine.unregister_timer(timer_id)
+```
+
+#### 日志
+
+```python
+hft_engine.log_info("策略启动完成")
+hft_engine.log_warn("价格异常")
+hft_engine.log_error("下单失败")
+```
+
+#### 状态持久化
+
+```python
+# 保存（跨热重载保留）
+hft_engine.save_state({"position": "2", "entry_price": "3850.0"})
+
+# 恢复
+state = hft_engine.load_state()  # → {"position": "2", "entry_price": "3850.0"}
 ```
 
 ### Python 数据结构
@@ -450,11 +512,15 @@ max_hold   = hft_engine.get_param_string("MaxHold", "1")
 
 | 值 | 枚举 | 含义 |
 |----|------|------|
-| 0 | `PendingSubmit` | 待报：订单已发往交易所，等待确认 |
-| 1 | `PartiallyFilled` | 部成：部分成交，剩余继续挂单 |
-| 2 | `Filled` | 全成：全部成交 |
-| 3 | `Canceled` | 已撤：已撤销 |
-| 4 | `Rejected` | 错误：被风控拦截或交易所拒绝 |
+| -1 | `Created` | 已创建：尚未发送到交易所 |
+| 0 | `Pending` | 待报/已报：等待成交 |
+| 1 | `PartTraded` | 部成：部分成交，剩余继续挂单 |
+| 2 | `AllTraded` | 全成：全部成交 |
+| 3 | `Cancelled` | 已撤：已撤销 |
+| 4 | `Error` | 错误：交易所拒绝 |
+| 5 | `RiskRejected` | 风控拒绝：被引擎风控拦截 |
+| 6 | `CancelPending` | 撤单中：撤单请求已发出 |
+| 7 | `Submitted` | 已提交：已发往交易所 |
 
 ### 风控拒绝原因 (status_msg)
 
@@ -475,6 +541,7 @@ max_hold   = hft_engine.get_param_string("MaxHold", "1")
 | 模式 | 含义 | 允许的操作 |
 |------|------|-----------|
 | `Normal` | 正常 | 所有操作 |
+| `Warning` | 预警 | 所有操作（仅标记预警状态） |
 | `NoOpen` | 禁开仓 | 只能平仓，禁止开仓 |
 | `ReduceOnly` | 仅减仓 | 只放行 `is_risk_reduction = true` 的订单 |
 | `Liquidating` | 平仓中 | 系统正在主动平仓，用户不能发单 |

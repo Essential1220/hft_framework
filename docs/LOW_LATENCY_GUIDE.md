@@ -15,7 +15,10 @@
 7. [VirtualLock —— 防止页面换出](#7-virtuallock--防止页面换出)
 8. [批量处理 —— 一次 drain 512 条](#8-批量处理--一次-drain-512-条)
 9. [渐进降级休眠 —— CPU pause → yield → sleep](#9-渐进降级休眠--cpu-pause--yield--sleep)
-10. [延伸阅读](#10-延伸阅读)
+10. [延迟环形缓冲 —— 512 定长环替代 std::map](#10-延迟环形缓冲--512-定长环替代-stdmap)
+11. [GIL 批量获取 —— 多策略共享一次锁](#11-gil-批量获取--多策略共享一次锁)
+12. [策略原子快照 —— shared_ptr + atomic_store/load](#12-策略原子快照--shared_ptr--atomic_storeload)
+13. [延伸阅读](#13-延伸阅读)
 
 ---
 
@@ -432,7 +435,206 @@ if (!got_event) {
 
 ---
 
-## 10. 延伸阅读
+## 10. 延迟环形缓冲 —— 512 定长环替代 std::map
+
+### 背景
+
+引擎需要测量下单到成交的延迟（order-to-trade）。最直观的做法是用
+`std::map<OrderRef, timestamp>` 保存每笔单的发送时间，成交时查表计算差值。
+但这意味着每次下单都要做一次 `map::insert`（红黑树插入，~50-100ns），每次成交
+都要做 `map::find + erase`（~30-80ns），还有堆分配开销。
+
+### 项目代码：`src/engine/trading_engine.h`
+
+```cpp
+struct OrderLatencyEntry {
+    char order_ref[16]{};        // FixedKey 风格，'\0' 起始表示槽位为空
+    long long sent_us = 0;
+};
+static constexpr size_t kOrderLatencyRingCap = 512;
+std::array<OrderLatencyEntry, kOrderLatencyRingCap> order_latency_ring_{};
+size_t order_latency_ring_head_ = 0;
+```
+
+**512 个固定大小的槽位：** `sizeof(OrderLatencyEntry) = 24`，整个环
+`24 × 512 = 12KB`，**完全驻留在 L1 数据缓存**（现代 CPU L1 一般 32-64KB）。
+
+### 写入（下单时）
+
+```cpp
+auto& slot = order_latency_ring_[order_latency_ring_head_];
+std::strncpy(slot.order_ref, order.order_ref, sizeof(slot.order_ref) - 1);
+slot.sent_us = now_us;
+order_latency_ring_head_ = (order_latency_ring_head_ + 1) % kOrderLatencyRingCap;
+```
+
+环形写入，无分支、无堆分配、无锁。满了自动覆盖最老的条目——对延迟测量来说
+丢失 500 笔以前的记录完全可以接受。
+
+### 读取（成交时）
+
+```cpp
+for (auto& entry : order_latency_ring_) {
+    if (entry.order_ref[0] != '\0' &&
+        std::strncmp(entry.order_ref, trade.order_ref, sizeof(entry.order_ref)) == 0) {
+        last_order_to_trade_us_.store(now_us - entry.sent_us, std::memory_order_relaxed);
+        entry.order_ref[0] = '\0';  // 标记为已消费
+        break;
+    }
+}
+```
+
+线性扫描 512 个槽位。看起来 O(n)，但实际上：
+- 整个数组在 L1 缓存中，顺序扫描触发硬件预取
+- 活跃条目通常集中在头部附近，多数情况下几步就命中
+- `strncmp` 16 字节 = 一条 SSE 指令
+
+**对比 std::map：** map 的 O(log n) 在树节点分散在堆上，每次比较都可能 cache miss；
+定长环的 O(n) 在连续内存上顺序扫描，cache hit 率接近 100%。
+实际延迟：定长环 ~10ns vs std::map ~50-80ns。
+
+---
+
+## 11. GIL 批量获取 —— 多策略共享一次锁
+
+### 背景
+
+Python 的 GIL（全局解释器锁）是进程级的。如果引擎运行 5 个 Python 策略，
+每个策略的 `on_tick` 都各自 `acquire_gil / release_gil`，一个 tick 就要锁 5 次。
+GIL 获取/释放每次 ~100-200ns，5 个策略 = 500-1000ns，在微秒级延迟预算里占比巨大。
+
+### 决策：批量 GIL
+
+只获取一次 GIL，所有 Python 策略在同一次持有下依次执行，最后统一释放。
+
+### 项目代码：`src/strategy/py_strategy.cpp`
+
+```cpp
+// 全局 TLS 标志：consumer_loop 批量获取 GIL 后置为 true
+thread_local bool g_batch_gil_active = false;
+
+struct PyGILGuard : StrategyBase::InterpreterLockGuard {
+    py::gil_scoped_acquire gil;
+    PyGILGuard() { g_batch_gil_active = true; }
+    ~PyGILGuard() override { g_batch_gil_active = false; }
+};
+```
+
+### 调用侧：`src/engine/trading_engine.cpp`
+
+```cpp
+// 在 process_tick 中：找到第一个 Python 策略，获取一次 GIL
+std::unique_ptr<StrategyBase::InterpreterLockGuard> interp_lock;
+for (const auto& strategy : *strategies_snapshot) {
+    if (strategy->is_interpreted()) {
+        interp_lock = strategy->acquire_interpreter_lock();  // GIL 获取一次
+        break;
+    }
+}
+
+// 然后所有策略依次执行——Python 策略检测到 g_batch_gil_active = true，跳过单独获取
+for (const auto& strategy : *strategies_snapshot) {
+    strategy->on_tick(tick);   // Python 策略不再各自获取 GIL
+}
+// interp_lock 离开作用域 → GIL 自动释放
+```
+
+### 策略侧的判断
+
+```cpp
+void PyStrategy::on_tick(const TickData& tick) {
+    if (g_batch_gil_active) {
+        // 已经在批量 GIL 下了，直接调用 Python 函数
+        fn_on_tick_(tick_to_dict(tick));
+        return;
+    }
+    // 非批量模式（如单策略部署），自行获取 GIL
+    py::gil_scoped_acquire gil;
+    fn_on_tick_(tick_to_dict(tick));
+}
+```
+
+**效果：** 5 个 Python 策略从 5 次 GIL 获取/释放（~500-1000ns）降为 1 次（~100-200ns），
+节省 ~80% 的 GIL 开销。这个优化对 `on_order`、`on_trade`、`on_bar`、`on_timer`
+同样生效。
+
+---
+
+## 12. 策略原子快照 —— shared_ptr + atomic_store/load
+
+### 背景
+
+热加载或动态增删策略时，策略列表 `strategies_` 需要被修改。如果 `process_tick()`
+在遍历策略列表时另一个线程修改了列表（添加/移除策略），会导致迭代器失效或崩溃。
+
+最简单的做法是加 `std::mutex`——但这意味着**每个 tick 都要锁一次**。
+这在微秒级延迟预算中不可接受。
+
+### 决策：Copy-on-Write + atomic shared_ptr
+
+写者（add/remove_strategy）在持有 `strategies_mtx_` 时拷贝一份不可变的策略向量，
+然后用 `atomic_store` 发布。读者（process_tick）用 `atomic_load` 获取快照——
+**零锁、零分配**。
+
+### 项目代码：`src/engine/trading_engine.h`
+
+```cpp
+std::vector<std::shared_ptr<StrategyBase>> strategies_;
+mutable std::mutex strategies_mtx_;
+
+// 热路径只读快照：读者 atomic_load 拿到 shared_ptr，无锁、无分配
+std::shared_ptr<const std::vector<std::shared_ptr<StrategyBase>>> strategies_snapshot_ptr_;
+```
+
+### 写者（策略增删时）：`src/engine/trading_engine.cpp`
+
+```cpp
+void TradingEngine::refresh_strategies_snapshot() {
+    // 必须在持有 strategies_mtx_ 时调用
+    auto fresh = std::make_shared<std::vector<std::shared_ptr<StrategyBase>>>(strategies_);
+    std::atomic_store_explicit(
+        &strategies_snapshot_ptr_,
+        std::shared_ptr<const std::vector<std::shared_ptr<StrategyBase>>>(std::move(fresh)),
+        std::memory_order_release);
+}
+```
+
+每次增删策略都创建一份**新的不可变副本**（`make_shared` + 拷贝），然后原子替换指针。
+旧副本由 `shared_ptr` 引用计数自动回收——如果某个读者还在用旧快照，旧副本不会被释放。
+
+### 读者（每个 tick）：
+
+```cpp
+std::shared_ptr<const std::vector<std::shared_ptr<StrategyBase>>>
+TradingEngine::load_strategies_snapshot() const {
+    return std::atomic_load_explicit(&strategies_snapshot_ptr_, std::memory_order_acquire);
+}
+```
+
+**每个 tick 的代价：** 一次 `atomic_load`（~1-2ns），拿到一个 `shared_ptr` 的拷贝。
+没有 `mutex::lock`，没有堆分配，没有迭代器失效风险。
+
+### 同样的模式：InstrumentRegistry
+
+热合约集合 `hot_instruments_` 用完全相同的 copy-on-write + atomic shared_ptr 模式：
+
+```cpp
+// instrument_registry.h
+std::shared_ptr<const HotSet> hot_instruments_;
+
+// 读者：is_hot() 用 atomic_load(shared_ptr<const HotSet>)，零锁
+// 写者：register_hot/rebuild_hot 在 hot_write_mtx_ 下做 copy-on-write
+//       然后 atomic_store
+```
+
+**为什么不用 `std::shared_mutex`（读写锁）？** 读写锁的 read-lock 在 x86 上仍然
+需要原子 increment/decrement 引用计数（~10-20ns），且在写者持有时读者会阻塞。
+`atomic_load(shared_ptr)` 更轻量，且读者永远不阻塞——即使写者正在替换快照，
+读者拿到的是旧快照的合法拷贝。
+
+---
+
+## 13. 延伸阅读
 
 - [BENCHMARK.md](BENCHMARK.md) —— 本项目可复现的延迟数据
 - [DESIGN.md](DESIGN.md) —— 每个模块为什么这样设计的详细解释
