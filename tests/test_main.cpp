@@ -237,6 +237,19 @@ void test_network_receiver_factory();
 void test_udp_publish_receive_roundtrip();
 void test_udp_header_format();
 
+// ConfigValidator
+void test_config_valid_passes();
+void test_config_missing_account_section();
+void test_config_md_account_not_in_list();
+void test_config_risk_invalid_cancel_rate();
+void test_config_risk_negative_order_size();
+void test_config_invalid_log_level();
+void test_config_invalid_web_port();
+void test_config_strategy_missing_section();
+void test_config_strategy_python_no_script();
+void test_config_invalid_run_mode();
+void test_config_empty_accounts_warns();
+
 #ifdef HFT_HAS_QDP
 // QDP gateway smoke tests (only compiled when HFT_ENABLE_QDP=ON)
 void test_qdp_md_gateway_can_construct();
@@ -422,6 +435,20 @@ int main() {
     TEST_SUITE("UdpGateway");
     RUN_TEST(test_udp_publish_receive_roundtrip);
     RUN_TEST(test_udp_header_format);
+
+    // ---- ConfigValidator ----
+    TEST_SUITE("ConfigValidator");
+    RUN_TEST(test_config_valid_passes);
+    RUN_TEST(test_config_missing_account_section);
+    RUN_TEST(test_config_md_account_not_in_list);
+    RUN_TEST(test_config_risk_invalid_cancel_rate);
+    RUN_TEST(test_config_risk_negative_order_size);
+    RUN_TEST(test_config_invalid_log_level);
+    RUN_TEST(test_config_invalid_web_port);
+    RUN_TEST(test_config_strategy_missing_section);
+    RUN_TEST(test_config_strategy_python_no_script);
+    RUN_TEST(test_config_invalid_run_mode);
+    RUN_TEST(test_config_empty_accounts_warns);
 
 #ifdef HFT_HAS_QDP
     // ---- QDP gateway smoke ----

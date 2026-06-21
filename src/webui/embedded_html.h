@@ -2,7 +2,7 @@
 // Auto-generated embedded HTML for HFT WebUI dashboard.
 // Single-page app: vanilla JS + fetch polling, no framework dependencies.
 
-static const char EMBEDDED_HTML[] = R"html(<!DOCTYPE html>
+static const char EMBEDDED_HTML[] = R"html_1(<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -174,7 +174,8 @@ function cancelAll() {
 async function fetchJson(url) {
   try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch { return null; }
 }
-
+)html_1"
+R"html_2(
 async function refresh() {
   const [status, accounts, strategies, latency, pnl, ticks, orders, trades, alerts, risk] = await Promise.all([
     fetchJson('/api/status'), fetchJson('/api/accounts'), fetchJson('/api/strategies'),
@@ -353,4 +354,4 @@ refresh();
 setInterval(refresh, 2000);
 </script>
 </body>
-</html>)html";
+</html>)html_2";

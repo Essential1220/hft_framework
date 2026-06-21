@@ -21,6 +21,7 @@
 #include "gateway/udp_md_gateway.h"
 #include "strategy/simple_strategy.h"
 #include "strategy/strategy_config.h"
+#include "common/config_validator.h"
 #ifdef ENABLE_PYTHON
 #include "strategy/py_strategy.h"
 #include <pybind11/embed.h>
@@ -268,6 +269,21 @@ bool AppRuntime::initialize(const std::string& config_path, std::function<void()
         LOG_ERROR("engine initialization failed, check config.ini");
         engine_.reset();
         return false;
+    }
+
+    {
+        ConfigValidator validator;
+        std::vector<ConfigValidationError> validation_errors;
+        if (!validator.validate(engine_->get_config(), validation_errors)) {
+            for (const auto& e : validation_errors) {
+                LOG_ERROR("config validation: [" + e.section + "] " + e.key + " — " + e.message);
+            }
+            LOG_ERROR("config validation failed with " +
+                      std::to_string(validation_errors.size()) + " error(s), aborting startup");
+            engine_.reset();
+            return false;
+        }
+        LOG_INFO("config validation passed");
     }
 
     if (store_ && engine_) {
