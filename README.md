@@ -1,5 +1,6 @@
 # hft_framework
 
+[![Build](https://github.com/Essential1220/hft_framework/actions/workflows/build.yml/badge.svg)](https://github.com/Essential1220/hft_framework/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Standard: C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#build)

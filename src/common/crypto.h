@@ -5,11 +5,12 @@
 // Windows: uses DPAPI (CryptProtectData/CryptUnprotectData)
 //   - Key is tied to current Windows user, no key management needed
 //     (密钥绑定当前 Windows 用户，无需管理密钥)
-//   - Encrypted result is Base64-encoded before storing in SQLite
-//     (加密结果 Base64 编码后存入 SQLite)
 //
-// Non-Windows: uses simple XOR obfuscation (can be replaced with AES later)
-//   (非 Windows: 使用简单 XOR 混淆，后续可替换为 AES)
+// Linux: uses AES-256-GCM via OpenSSL
+//   - Key derived from machine identity: SHA-256(hostname + uid + /etc/machine-id)
+//     (密钥从机器身份派生: SHA-256(主机名 + uid + machine-id))
+//   - Backward-compatible: auto-detects and decrypts old XOR-obfuscated values
+//     (向后兼容: 自动检测并解密旧的 XOR 混淆值)
 // ============================================
 
 #include <string>
