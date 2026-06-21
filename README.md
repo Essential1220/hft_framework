@@ -66,10 +66,10 @@ experiments.
 | **Gateways** | CTP (market data + trade), QDP (SHFE FTD, optional), FIX (stub), UDP multicast relay, shared-memory IPC, dual-gateway hot failover |
 | **Strategies** | Native C++, embedded Python (pybind11, zero-copy), hot-reload without engine restart |
 | **Order types** | Limit, conditional (stop-loss / take-profit / trailing-stop / entry-trigger), OCO groups, algorithmic (TWAP / Iceberg) |
-| **Risk** | Pre-trade checks (size / position / order-rate / cancel-rate / daily-loss), 5 RMS modes (Normal → Halted) |
+| **Risk** | 10-dimensional pre-trade checks (RMS mode / volume / price / size / session / daily-loss / net-position / closeable / order-rate / cancel-rate), 5 RMS modes (Normal → Halted), risk-reduction exemption |
 | **Infrastructure** | Lock-free SPSC queue, async logger, CPU pinning, VirtualLock, WAL (io_uring on Linux), standalone watchdog |
 | **Observability** | HTTP REST API, Prometheus `/metrics`, embedded WebUI, webhook alerts (Slack / DingTalk) |
-| **Security** | Encrypted credential storage (DPAPI on Windows, AES-GCM on Linux) |
+| **Security** | Encrypted credential storage (DPAPI on Windows, XOR-Base64 on Linux) |
 | **Data** | Tick recording (binary / JSONL), K-line aggregation, CSV import, paper-trading engine |
 
 ### Benchmark
@@ -134,7 +134,8 @@ Full guide: **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | C++ / Python / REST API reference |
 | [docs/STRATEGY.md](docs/STRATEGY.md) | Python strategy authoring, `hft_engine` API, conditional orders |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `config.ini` key explained |
-| [docs/SECURITY.md](docs/SECURITY.md) | Credential encryption (DPAPI / AES-GCM) |
+| [docs/SECURITY.md](docs/SECURITY.md) | Credential encryption (DPAPI / XOR-Base64) |
+| [docs/LOW_LATENCY_GUIDE.md](docs/LOW_LATENCY_GUIDE.md) | Low-latency techniques explained with code |
 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | Reproducible latency numbers |
 
 ### CTP SDK
@@ -204,10 +205,10 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 | **网关** | CTP（行情 + 交易）、QDP（上期所 FTD，可选）、FIX（stub）、UDP 组播转发、共享内存 IPC、双活热切换 |
 | **策略** | C++ 原生、内嵌 Python（pybind11，零拷贝）、热加载无需重启 |
 | **委托类型** | 限价、条件单（止损/止盈/追踪止损/触发开仓）、OCO 互斥组、算法单（TWAP/冰山） |
-| **风控** | 盘前检查（单笔/净持仓/报单率/撤单率/日内亏损）、5 档 RMS 模式（正常→熔断） |
+| **风控** | 10 维盘前检查（RMS 模式/数量/价格/单笔限额/交易时段/日损/净持仓投影/可平量/报单率/撤单率）、5 档 RMS 模式（正常→熔断）、减仓豁免机制 |
 | **基础设施** | 无锁 SPSC 队列、异步日志、CPU 绑核、VirtualLock、WAL（Linux io_uring）、独立看门狗 |
 | **可观测性** | HTTP REST API、Prometheus `/metrics`、内嵌 WebUI、Webhook 报警（Slack/钉钉） |
-| **安全** | 凭据加密（Windows DPAPI / Linux AES-GCM） |
+| **安全** | 凭据加密（Windows DPAPI / Linux XOR-Base64） |
 | **数据** | Tick 录制（二进制/JSONL）、K 线聚合、CSV 导入、模拟撮合引擎 |
 
 ### 性能数据
@@ -269,7 +270,8 @@ cd dist && ./hft_framework --config config.ini
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | C++ / Python / REST API 参考 |
 | [docs/STRATEGY.md](docs/STRATEGY.md) | Python 策略开发、`hft_engine` API、条件单 |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.ini` 每个 key 详解 |
-| [docs/SECURITY.md](docs/SECURITY.md) | 凭据加密（DPAPI / AES-GCM） |
+| [docs/SECURITY.md](docs/SECURITY.md) | 凭据加密（DPAPI / XOR-Base64） |
+| [docs/LOW_LATENCY_GUIDE.md](docs/LOW_LATENCY_GUIDE.md) | 低延迟技术逐项解析（含代码） |
 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | 可复现的延迟数据 |
 
 ### 设计文档
